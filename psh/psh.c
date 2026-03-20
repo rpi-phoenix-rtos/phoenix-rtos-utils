@@ -184,6 +184,7 @@ int main(int argc, char **argv)
 	while (lookup("/", NULL, &oid) < 0) {
 		usleep(10000);
 	}
+	psh_write(STDERR_FILENO, "psh: root ready\n", sizeof("psh: root ready\n") - 1);
 
 	/* Check if its first shell */
 	psh_common.tcpid = tcgetpgrp(STDIN_FILENO);
@@ -202,7 +203,9 @@ int main(int argc, char **argv)
 		/* Run app */
 		app = psh_findapp(base);
 		if (app != NULL) {
+			psh_write(STDERR_FILENO, "psh: app run\n", sizeof("psh: app run\n") - 1);
 			err = app->run(argc, argv);
+			psh_write(STDERR_FILENO, "psh: app done\n", sizeof("psh: app done\n") - 1);
 			psh_common.exitStatus = err;
 		}
 		else {

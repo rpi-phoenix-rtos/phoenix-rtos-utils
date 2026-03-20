@@ -1569,11 +1569,14 @@ static int psh_run(int exitable, const char *console)
 	int cnt, err, argc, retries;
 	pid_t pgrp;
 
+	psh_write(STDERR_FILENO, "psh: run enter\n", sizeof("psh: run enter\n") - 1);
+
 	/* Time for klog to print data from buffer */
 	sleep(1);
 
 	/* Only open tty if we are the first shell. */
 	if (psh_common.tcpid == -1) {
+		psh_write(STDERR_FILENO, "psh: tty open\n", sizeof("psh: tty open\n") - 1);
 		for (retries = 5; retries > 0; retries--) {
 			err = psh_ttyopen(console);
 			if (err == 0) {
@@ -1584,6 +1587,7 @@ static int psh_run(int exitable, const char *console)
 		if (err < 0) {
 			return err;
 		}
+		psh_write(STDERR_FILENO, "psh: tty ready\n", sizeof("psh: tty ready\n") - 1);
 	}
 
 	/* Wait till we run in foreground */
@@ -1629,6 +1633,7 @@ static int psh_run(int exitable, const char *console)
 	}
 
 	/* Take terminal control - only interactive psh should take control */
+	psh_write(STDERR_FILENO, "psh: tcsetpgrp\n", sizeof("psh: tcsetpgrp\n") - 1);
 	err = tcsetpgrp(STDIN_FILENO, pgrp);
 	if (err < 0) {
 		fprintf(stderr, "psh: failed to take terminal control\n");
@@ -1645,6 +1650,7 @@ static int psh_run(int exitable, const char *console)
 	while (pgrp == tcgetpgrp(STDIN_FILENO)) {
 		struct psh_redir redir;
 
+		psh_write(STDERR_FILENO, "psh: readcmd\n", sizeof("psh: readcmd\n") - 1);
 		int n = psh_readcmd(&orig, cmdhist, &cmd);
 		if (n < 0) {
 			err = n;
