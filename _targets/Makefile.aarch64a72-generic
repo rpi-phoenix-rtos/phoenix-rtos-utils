@@ -1,0 +1,9 @@
+#
+# Makefile for Phoenix-RTOS 3 utils
+#
+# Generic AArch64 A72 tool set
+#
+# Copyright 2026 Phoenix Systems
+#
+
+DEFAULT_COMPONENTS := psh
