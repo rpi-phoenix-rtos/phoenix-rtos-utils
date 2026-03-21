@@ -29,7 +29,6 @@
 
 
 psh_common_t psh_common = { NULL };
-static int psh_ttyopenTraceDone;
 
 
 const psh_appentry_t *psh_applist_first(void)
@@ -139,37 +138,17 @@ size_t psh_read(int fd, void *buf, size_t count)
 }
 
 
-static void psh_ttyopenTrace(const char *stage, int err)
-{
-	char buff[64];
-	int len;
-
-	if (psh_ttyopenTraceDone != 0) {
-		return;
-	}
-
-	len = snprintf(buff, sizeof(buff), "psh: tty open fail %s %d\n", stage, err);
-	if (len > 0) {
-		psh_write(STDERR_FILENO, buff, (size_t)len);
-	}
-
-	psh_ttyopenTraceDone = 1;
-}
-
-
 int psh_ttyopen(const char *ttydev)
 {
 	char *newPath;
 
 	int fd = open(ttydev, O_RDWR);
 	if (fd < 0) {
-		psh_ttyopenTrace("open", -errno);
 		return -errno;
 	}
 
 	if (isatty(fd) != 1) {
 		close(fd);
-		psh_ttyopenTrace("isatty", -ENOTTY);
 		return -ENOTTY;
 	}
 
