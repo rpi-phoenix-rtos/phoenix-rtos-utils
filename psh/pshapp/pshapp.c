@@ -45,6 +45,14 @@
 #define CMDSZ        128       /* Command buffer size */
 #define HISTSZ       512       /* Command history size */
 
+#ifndef PSH_TTYOPEN_RETRIES
+#define PSH_TTYOPEN_RETRIES 20
+#endif
+
+#ifndef PSH_TTYOPEN_RETRY_US
+#define PSH_TTYOPEN_RETRY_US 100000
+#endif
+
 
 /* Misc definitions */
 #define BP_OFFS     0  /* Offset of 0 exponent entry in binary prefix table */
@@ -1577,12 +1585,12 @@ static int psh_run(int exitable, const char *console)
 	/* Only open tty if we are the first shell. */
 	if (psh_common.tcpid == -1) {
 		psh_write(STDERR_FILENO, "psh: tty open\n", sizeof("psh: tty open\n") - 1);
-		for (retries = 5; retries > 0; retries--) {
+		for (retries = PSH_TTYOPEN_RETRIES; retries > 0; retries--) {
 			err = psh_ttyopen(console);
 			if (err == 0) {
 				break;
 			}
-			usleep(100000);
+			usleep(PSH_TTYOPEN_RETRY_US);
 		}
 		if (err < 0) {
 			return err;
