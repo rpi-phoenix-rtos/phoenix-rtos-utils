@@ -33,6 +33,7 @@
 #include <sys/types.h>
 #include <sys/pwman.h>
 #include <sys/threads.h>
+#include <sys/debug.h>
 
 #include <posix/utils.h>
 
@@ -1577,15 +1578,20 @@ static int psh_run(int exitable, const char *console)
 	int cnt, err, argc, retries;
 	pid_t pgrp;
 
+	debug("pshapp: run enter\n");
 	psh_write(STDERR_FILENO, "psh: run enter\n", sizeof("psh: run enter\n") - 1);
 
 	/* Time for klog to print data from buffer */
+	debug("pshapp: sleep enter\n");
 	sleep(1);
+	debug("pshapp: sleep done\n");
 
 	/* Only open tty if we are the first shell. */
 	if (psh_common.tcpid == -1) {
+		debug("pshapp: tty loop enter\n");
 		psh_write(STDERR_FILENO, "psh: tty open\n", sizeof("psh: tty open\n") - 1);
 		for (retries = PSH_TTYOPEN_RETRIES; retries > 0; retries--) {
+			debug("pshapp: ttyopen attempt\n");
 			err = psh_ttyopen(console);
 			if (err == 0) {
 				break;
@@ -1593,12 +1599,15 @@ static int psh_run(int exitable, const char *console)
 			usleep(PSH_TTYOPEN_RETRY_US);
 		}
 		if (err < 0) {
+			debug("pshapp: ttyopen failed\n");
 			return err;
 		}
+		debug("pshapp: tty ready\n");
 		psh_write(STDERR_FILENO, "psh: tty ready\n", sizeof("psh: tty ready\n") - 1);
 	}
 
 	/* Wait till we run in foreground */
+	debug("pshapp: fg wait enter\n");
 	if (tcgetpgrp(STDIN_FILENO) != -1) {
 		for (;;) {
 			pgrp = tcgetpgrp(STDIN_FILENO);
@@ -1611,14 +1620,17 @@ static int psh_run(int exitable, const char *console)
 			}
 		}
 	}
+	debug("pshapp: fg wait done\n");
 
 	/* Set signal handlers */
+	debug("pshapp: signals enter\n");
 	signal(SIGINT, psh_signalint);
 	signal(SIGQUIT, psh_signalquit);
 	signal(SIGTSTP, psh_signalstop);
 	signal(SIGTTIN, SIG_IGN);
 	signal(SIGTTOU, SIG_IGN);
 	signal(SIGCHLD, SIG_IGN);
+	debug("pshapp: signals done\n");
 
 	/* Check if this psh session is already in interactive mode */
 	if (pshapp_common.cmdhist != NULL) {
@@ -1626,44 +1638,55 @@ static int psh_run(int exitable, const char *console)
 	}
 
 	/* Put ourselves in our own process group */
+	debug("pshapp: setpgid enter\n");
 	pgrp = getpid();
 	err = setpgid(pgrp, pgrp);
 	if (err < 0) {
 		fprintf(stderr, "psh: failed to put shell in its own process group\n");
 		return err;
 	}
+	debug("pshapp: setpgid done\n");
 
 	/* Save original terminal settings */
+	debug("pshapp: tcgetattr enter\n");
 	err = tcgetattr(STDIN_FILENO, &orig);
 	if (err < 0) {
 		fprintf(stderr, "psh: failed to save terminal settings\n");
 		return err;
 	}
+	debug("pshapp: tcgetattr done\n");
 
 	/* Take terminal control - only interactive psh should take control */
+	debug("pshapp: tcsetpgrp enter\n");
 	psh_write(STDERR_FILENO, "psh: tcsetpgrp\n", sizeof("psh: tcsetpgrp\n") - 1);
 	err = tcsetpgrp(STDIN_FILENO, pgrp);
 	if (err < 0) {
 		fprintf(stderr, "psh: failed to take terminal control\n");
 		return err;
 	}
+	debug("pshapp: tcsetpgrp done\n");
 
+	debug("pshapp: cmdhist alloc enter\n");
 	cmdhist = calloc(1, sizeof(*cmdhist));
 	if (cmdhist == NULL) {
 		fprintf(stderr, "psh: failed to allocate command history storage\n");
 		return -ENOMEM;
 	}
 	pshapp_common.cmdhist = cmdhist;
+	debug("pshapp: cmdhist ready\n");
 
 	while (pgrp == tcgetpgrp(STDIN_FILENO)) {
 		struct psh_redir redir;
 
+		debug("pshapp: readcmd enter\n");
 		psh_write(STDERR_FILENO, "psh: readcmd\n", sizeof("psh: readcmd\n") - 1);
 		int n = psh_readcmd(&orig, cmdhist, &cmd);
 		if (n < 0) {
+			debug("pshapp: readcmd failed\n");
 			err = n;
 			break;
 		}
+		debug("pshapp: readcmd done\n");
 
 		err = psh_parsecmd(cmd, &argc, &argv);
 		if (err < 0) {
