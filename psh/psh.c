@@ -141,19 +141,25 @@ size_t psh_read(int fd, void *buf, size_t count)
 int psh_ttyopen(const char *ttydev)
 {
 	char *newPath;
+	char msg[64];
 
 	int fd = open(ttydev, O_RDWR);
 	if (fd < 0) {
+		snprintf(msg, sizeof(msg), "psh: tty open err=%d\n", errno);
+		psh_write(STDERR_FILENO, msg, strlen(msg));
 		return -errno;
 	}
 
 	if (isatty(fd) != 1) {
+		snprintf(msg, sizeof(msg), "psh: tty isatty err=%d\n", errno);
+		psh_write(STDERR_FILENO, msg, strlen(msg));
 		close(fd);
 		return -ENOTTY;
 	}
 
 	newPath = psh_stralloc(psh_common.ttydev, ttydev);
 	if (newPath == NULL) {
+		psh_write(STDERR_FILENO, "psh: tty path alloc failed\n", sizeof("psh: tty path alloc failed\n") - 1);
 		close(fd);
 		return -ENOMEM;
 	}
