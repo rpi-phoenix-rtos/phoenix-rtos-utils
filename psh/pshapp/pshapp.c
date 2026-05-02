@@ -1596,10 +1596,21 @@ static int psh_run(int exitable, const char *console)
 			}
 			usleep(PSH_TTYOPEN_RETRY_US);
 		}
+		/* TODO(TD-14-ttyopen-nonfatal): on real Pi 4 the slow IPC path
+		 * to pl011-tty / devfs sometimes prevents /dev/console from
+		 * being openable within our retry budget. Treat ttyopen
+		 * failure as non-fatal: psh continues with whatever
+		 * stdin/stdout/stderr it inherited from posix_clone (the
+		 * kernel klog port). We get a one-way (psh)% banner on UART
+		 * — not interactive, but proof of life. Restore the fatal
+		 * path once the underlying IPC fragility is rooted out. */
 		if (err < 0) {
-			return err;
+			psh_write(STDERR_FILENO, "psh: tty ttyopen failed (non-fatal, using inherited stdio)\n",
+					sizeof("psh: tty ttyopen failed (non-fatal, using inherited stdio)\n") - 1);
 		}
-		psh_write(STDERR_FILENO, "psh: tty ready\n", sizeof("psh: tty ready\n") - 1);
+		else {
+			psh_write(STDERR_FILENO, "psh: tty ready\n", sizeof("psh: tty ready\n") - 1);
+		}
 	}
 
 	/* Wait till we run in foreground */
