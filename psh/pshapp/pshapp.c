@@ -47,7 +47,11 @@
 #define HISTSZ       512       /* Command history size */
 
 #ifndef PSH_TTYOPEN_RETRIES
-#define PSH_TTYOPEN_RETRIES 20
+/* TODO(TD-14-psh-retry): bumped from 20 to 200 (20 s wall) for real
+ * Pi 4 where pl011-tty's own create_dev(/dev/console) takes
+ * materially longer than on QEMU (TD-04-class). Restore to 20 after
+ * the underlying IPC slowness is rooted out. */
+#define PSH_TTYOPEN_RETRIES 200
 #endif
 
 #ifndef PSH_TTYOPEN_RETRY_US
