@@ -20,6 +20,7 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include <sys/debug.h>
 #include <sys/msg.h>
 #include <sys/pwman.h>
 
@@ -146,20 +147,22 @@ int psh_ttyopen(const char *ttydev)
 	int fd = open(ttydev, O_RDWR);
 	if (fd < 0) {
 		snprintf(msg, sizeof(msg), "psh: tty open err=%d\n", errno);
-		psh_write(STDERR_FILENO, msg, strlen(msg));
+		debug(msg);
 		return -errno;
 	}
 
+	debug("psh: tty isatty\n");
 	if (isatty(fd) != 1) {
 		snprintf(msg, sizeof(msg), "psh: tty isatty err=%d\n", errno);
-		psh_write(STDERR_FILENO, msg, strlen(msg));
+		debug(msg);
 		close(fd);
 		return -ENOTTY;
 	}
+	debug("psh: tty isatty done\n");
 
 	newPath = psh_stralloc(psh_common.ttydev, ttydev);
 	if (newPath == NULL) {
-		psh_write(STDERR_FILENO, "psh: tty path alloc failed\n", sizeof("psh: tty path alloc failed\n") - 1);
+		debug("psh: tty path alloc failed\n");
 		close(fd);
 		return -ENOMEM;
 	}
@@ -182,15 +185,22 @@ int main(int argc, char **argv)
 	oid_t oid;
 	const psh_appentry_t *app;
 	int err = EOK;
+	unsigned int rootRetries = 0;
 	unsigned int ispshlogin;
 
+	debug("psh: main enter\n");
 	keepidle(1);
+	debug("psh: keepidle done\n");
 
 	/* Wait for root filesystem */
 	while (lookup("/", NULL, &oid) < 0) {
+		if ((rootRetries == 0U) || ((rootRetries % 1000U) == 0U)) {
+			debug("psh: root wait\n");
+		}
+		rootRetries++;
 		usleep(10000);
 	}
-	psh_write(STDERR_FILENO, "psh: root ready\n", sizeof("psh: root ready\n") - 1);
+	debug("psh: root ready\n");
 
 	/* Check if its first shell */
 	psh_common.tcpid = tcgetpgrp(STDIN_FILENO);
@@ -209,9 +219,9 @@ int main(int argc, char **argv)
 		/* Run app */
 		app = psh_findapp(base);
 		if (app != NULL) {
-			psh_write(STDERR_FILENO, "psh: app run\n", sizeof("psh: app run\n") - 1);
+			debug("psh: app run\n");
 			err = app->run(argc, argv);
-			psh_write(STDERR_FILENO, "psh: app done\n", sizeof("psh: app done\n") - 1);
+			debug("psh: app done\n");
 			psh_common.exitStatus = err;
 		}
 		else {

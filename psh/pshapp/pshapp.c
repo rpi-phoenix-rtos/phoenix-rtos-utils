@@ -27,6 +27,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+#include <sys/debug.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -1581,14 +1582,14 @@ static int psh_run(int exitable, const char *console)
 	int cnt, err, argc, retries;
 	pid_t pgrp;
 
-	psh_write(STDERR_FILENO, "psh: run enter\n", sizeof("psh: run enter\n") - 1);
+	debug("psh: run enter\n");
 
 	/* Time for klog to print data from buffer */
 	sleep(1);
 
 	/* Only open tty if we are the first shell. */
 	if (psh_common.tcpid == -1) {
-		psh_write(STDERR_FILENO, "psh: tty open\n", sizeof("psh: tty open\n") - 1);
+		debug("psh: tty open\n");
 		for (retries = PSH_TTYOPEN_RETRIES; retries > 0; retries--) {
 			err = psh_ttyopen(console);
 			if (err == 0) {
@@ -1605,11 +1606,10 @@ static int psh_run(int exitable, const char *console)
 		 * — not interactive, but proof of life. Restore the fatal
 		 * path once the underlying IPC fragility is rooted out. */
 		if (err < 0) {
-			psh_write(STDERR_FILENO, "psh: tty ttyopen failed (non-fatal, using inherited stdio)\n",
-					sizeof("psh: tty ttyopen failed (non-fatal, using inherited stdio)\n") - 1);
+			debug("psh: tty ttyopen failed (non-fatal, using inherited stdio)\n");
 		}
 		else {
-			psh_write(STDERR_FILENO, "psh: tty ready\n", sizeof("psh: tty ready\n") - 1);
+			debug("psh: tty ready\n");
 		}
 	}
 
@@ -1656,12 +1656,13 @@ static int psh_run(int exitable, const char *console)
 	}
 
 	/* Take terminal control - only interactive psh should take control */
-	psh_write(STDERR_FILENO, "psh: tcsetpgrp\n", sizeof("psh: tcsetpgrp\n") - 1);
+	debug("psh: tcsetpgrp\n");
 	err = tcsetpgrp(STDIN_FILENO, pgrp);
 	if (err < 0) {
 		fprintf(stderr, "psh: failed to take terminal control\n");
 		return err;
 	}
+	debug("psh: tcsetpgrp done\n");
 
 	cmdhist = calloc(1, sizeof(*cmdhist));
 	if (cmdhist == NULL) {
@@ -1673,7 +1674,7 @@ static int psh_run(int exitable, const char *console)
 	while (pgrp == tcgetpgrp(STDIN_FILENO)) {
 		struct psh_redir redir;
 
-		psh_write(STDERR_FILENO, "psh: readcmd\n", sizeof("psh: readcmd\n") - 1);
+		debug("psh: readcmd\n");
 		int n = psh_readcmd(&orig, cmdhist, &cmd);
 		if (n < 0) {
 			err = n;
