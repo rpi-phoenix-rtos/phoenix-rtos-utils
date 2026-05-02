@@ -22,7 +22,6 @@
 
 #include <sys/msg.h>
 #include <sys/pwman.h>
-#include <sys/debug.h>
 
 #include <libgen.h>
 
@@ -143,37 +142,29 @@ int psh_ttyopen(const char *ttydev)
 {
 	char *newPath;
 
-	debug("psh: ttyopen open enter\n");
 	int fd = open(ttydev, O_RDWR);
 	if (fd < 0) {
-		debug("psh: ttyopen open failed\n");
 		return -errno;
 	}
 
-	debug("psh: ttyopen isatty enter\n");
 	if (isatty(fd) != 1) {
 		close(fd);
-		debug("psh: ttyopen not tty\n");
 		return -ENOTTY;
 	}
 
-	debug("psh: ttyopen path alloc enter\n");
 	newPath = psh_stralloc(psh_common.ttydev, ttydev);
 	if (newPath == NULL) {
 		close(fd);
-		debug("psh: ttyopen path alloc failed\n");
 		return -ENOMEM;
 	}
 
 	psh_common.ttydev = newPath;
 
-	debug("psh: ttyopen dup2 enter\n");
 	dup2(fd, STDIN_FILENO);
 	dup2(fd, STDOUT_FILENO);
 	dup2(fd, STDERR_FILENO);
 
 	close(fd);
-	debug("psh: ttyopen done\n");
 
 	return EOK;
 }
@@ -187,25 +178,17 @@ int main(int argc, char **argv)
 	int err = EOK;
 	unsigned int ispshlogin;
 
-	debug("psh: main enter\n");
-	debug("psh: keepidle enter\n");
 	keepidle(1);
-	debug("psh: keepidle done\n");
 
 	/* Wait for root filesystem */
-	debug("psh: root lookup enter\n");
 	while (lookup("/", NULL, &oid) < 0) {
 		usleep(10000);
 	}
-	debug("psh: root lookup done\n");
 	psh_write(STDERR_FILENO, "psh: root ready\n", sizeof("psh: root ready\n") - 1);
 
 	/* Check if its first shell */
-	debug("psh: tcgetpgrp enter\n");
 	psh_common.tcpid = tcgetpgrp(STDIN_FILENO);
-	debug("psh: tcgetpgrp done\n");
 	base = basename(argv[0]);
-	debug("psh: basename done\n");
 	ispshlogin = (strcmp(base, "pshlogin") == 0);
 	do {
 		/* login prompt */
@@ -218,18 +201,14 @@ int main(int argc, char **argv)
 		}
 
 		/* Run app */
-		debug("psh: findapp enter\n");
 		app = psh_findapp(base);
 		if (app != NULL) {
-			debug("psh: app run enter\n");
 			psh_write(STDERR_FILENO, "psh: app run\n", sizeof("psh: app run\n") - 1);
 			err = app->run(argc, argv);
-			debug("psh: app run done\n");
 			psh_write(STDERR_FILENO, "psh: app done\n", sizeof("psh: app done\n") - 1);
 			psh_common.exitStatus = err;
 		}
 		else {
-			debug("psh: app not found\n");
 			err = PSH_UNKNOWN_CMD;
 			psh_common.exitStatus = err;
 			fprintf(stderr, "psh: %s: unknown command\n", argv[0]);
@@ -240,7 +219,6 @@ int main(int argc, char **argv)
 
 	free(psh_common.ttydev);
 
-	debug("psh: keepidle off enter\n");
 	keepidle(0);
 
 	return (err < 0) ? 1 : err;
