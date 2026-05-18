@@ -47,15 +47,12 @@
 #define HISTSZ       512       /* Command history size */
 
 #ifndef PSH_TTYOPEN_RETRIES
-/* TODO(TD-14-psh-retry): bumped from 20 to 200 (20 s wall) for real
- * Pi 4 where pl011-tty's own create_dev(/dev/console) takes
- * materially longer than on QEMU (TD-04-class). Restore to 20 after
- * the underlying IPC slowness is rooted out. */
-#define PSH_TTYOPEN_RETRIES 200
+#define PSH_TTYOPEN_RETRIES 50
 #endif
 
 #ifndef PSH_TTYOPEN_RETRY_US
-#define PSH_TTYOPEN_RETRY_US 100000
+/* 10 ms between retries — 50 × 10 ms = 500 ms upper bound on tty wait. */
+#define PSH_TTYOPEN_RETRY_US 10000
 #endif
 
 
@@ -1582,14 +1579,15 @@ static int psh_run(int exitable, const char *console)
 	int cnt, err, argc, retries;
 	pid_t pgrp;
 
-	debug("psh: run enter\n");
-
-	/* Time for klog to print data from buffer */
+	/* Upstream behaviour: give klog/dmesg time to drain to the terminal
+	 * before psh takes over the shared console. Originally a flat sleep(1)
+	 * (9d0ffff "psh: Increase sleep on start to allow dmesg to finish");
+	 * kept at 1 s for upstream parity. On Pi 4 the cold-boot klog drain at
+	 * 87 µs/byte means most messages are well past UART long before 1 s. */
 	sleep(1);
 
 	/* Only open tty if we are the first shell. */
 	if (psh_common.tcpid == -1) {
-		debug("psh: tty open\n");
 		for (retries = PSH_TTYOPEN_RETRIES; retries > 0; retries--) {
 			err = psh_ttyopen(console);
 			if (err == 0) {
@@ -1606,10 +1604,7 @@ static int psh_run(int exitable, const char *console)
 		 * — not interactive, but proof of life. Restore the fatal
 		 * path once the underlying IPC fragility is rooted out. */
 		if (err < 0) {
-			debug("psh: tty ttyopen failed (non-fatal, using inherited stdio)\n");
-		}
-		else {
-			debug("psh: tty ready\n");
+			fprintf(stderr, "psh: ttyopen %s failed: %d (using inherited stdio)\n", console, err);
 		}
 	}
 
@@ -1656,13 +1651,11 @@ static int psh_run(int exitable, const char *console)
 	}
 
 	/* Take terminal control - only interactive psh should take control */
-	debug("psh: tcsetpgrp\n");
 	err = tcsetpgrp(STDIN_FILENO, pgrp);
 	if (err < 0) {
 		fprintf(stderr, "psh: failed to take terminal control\n");
 		return err;
 	}
-	debug("psh: tcsetpgrp done\n");
 
 	cmdhist = calloc(1, sizeof(*cmdhist));
 	if (cmdhist == NULL) {
@@ -1674,7 +1667,6 @@ static int psh_run(int exitable, const char *console)
 	while (pgrp == tcgetpgrp(STDIN_FILENO)) {
 		struct psh_redir redir;
 
-		debug("psh: readcmd\n");
 		int n = psh_readcmd(&orig, cmdhist, &cmd);
 		if (n < 0) {
 			err = n;

@@ -142,27 +142,19 @@ size_t psh_read(int fd, void *buf, size_t count)
 int psh_ttyopen(const char *ttydev)
 {
 	char *newPath;
-	char msg[64];
 
 	int fd = open(ttydev, O_RDWR);
 	if (fd < 0) {
-		snprintf(msg, sizeof(msg), "psh: tty open err=%d\n", errno);
-		debug(msg);
 		return -errno;
 	}
 
-	debug("psh: tty isatty\n");
 	if (isatty(fd) != 1) {
-		snprintf(msg, sizeof(msg), "psh: tty isatty err=%d\n", errno);
-		debug(msg);
 		close(fd);
 		return -ENOTTY;
 	}
-	debug("psh: tty isatty done\n");
 
 	newPath = psh_stralloc(psh_common.ttydev, ttydev);
 	if (newPath == NULL) {
-		debug("psh: tty path alloc failed\n");
 		close(fd);
 		return -ENOMEM;
 	}
@@ -188,19 +180,14 @@ int main(int argc, char **argv)
 	unsigned int rootRetries = 0;
 	unsigned int ispshlogin;
 
-	debug("psh: main enter\n");
 	keepidle(1);
-	debug("psh: keepidle done\n");
 
 	/* Wait for root filesystem */
 	while (lookup("/", NULL, &oid) < 0) {
-		if ((rootRetries == 0U) || ((rootRetries % 1000U) == 0U)) {
-			debug("psh: root wait\n");
-		}
 		rootRetries++;
 		usleep(10000);
 	}
-	debug("psh: root ready\n");
+	(void)rootRetries;
 
 	/* Check if its first shell */
 	psh_common.tcpid = tcgetpgrp(STDIN_FILENO);
@@ -219,9 +206,7 @@ int main(int argc, char **argv)
 		/* Run app */
 		app = psh_findapp(base);
 		if (app != NULL) {
-			debug("psh: app run\n");
 			err = app->run(argc, argv);
-			debug("psh: app done\n");
 			psh_common.exitStatus = err;
 		}
 		else {
