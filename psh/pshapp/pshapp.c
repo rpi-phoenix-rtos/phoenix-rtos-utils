@@ -1579,12 +1579,25 @@ static int psh_run(int exitable, const char *console)
 	int cnt, err, argc, retries;
 	pid_t pgrp;
 
-	/* Upstream behaviour: give klog/dmesg time to drain to the terminal
-	 * before psh takes over the shared console. Originally a flat sleep(1)
-	 * (9d0ffff "psh: Increase sleep on start to allow dmesg to finish");
-	 * kept at 1 s for upstream parity. On Pi 4 the cold-boot klog drain at
-	 * 87 µs/byte means most messages are well past UART long before 1 s. */
-	sleep(1);
+	/* TODO(TD-14-psh-sleep): upstream commit 9d0ffff3 "psh: Increase
+	 * sleep on start to allow dmesg to finish" adds a flat `sleep(1)`
+	 * here so klog/dmesg messages on the same UART finish printing
+	 * before psh switches the terminal to raw mode and paints the
+	 * prompt. On Pi 4 the same path is naturally serialized by the
+	 * very slow PL011 (87 µs/byte at 115200 baud, only ~12 KB/s):
+	 * by the time fbcon_init returns and psh is scheduled, the
+	 * kernel klog ring has already been streaming for the entire
+	 * kernel-boot wall time, and the residue draining after
+	 * `fbcon: ok` is short enough to interleave harmlessly with the
+	 * prompt and the user's first keystrokes. The 1 s wait would
+	 * therefore add a full second of dead air after `fbcon: ok`
+	 * with no observable benefit, regressing the
+	 * "almost-immediately-after-fbcon-ok" prompt the user came to
+	 * rely on. Restore the upstream sleep once Pi 4's UART can be
+	 * lifted off the same 115200 stream that klog uses (e.g. by
+	 * switching to a higher-baud PL011 alias or routing psh's
+	 * stdout through a separate /dev/ttyHDMI mirror). */
+	/* sleep(1); -- intentionally not called on Pi 4; see comment above */
 
 	/* Only open tty if we are the first shell. */
 	if (psh_common.tcpid == -1) {
