@@ -176,8 +176,24 @@ int psh_pm(int argc, char *argv[])
 	const uint32_t warnKernel = maxKernel - maxKernel / 10;
 	const uint32_t warnTotal = maxTotal - maxTotal / 10;
 
-	for (;;) {
-		sleep(interval);
+	/* Reset any sigint left over from earlier psh activity so the first
+	 * actual Ctrl-C arriving during pm takes effect. */
+	psh_common.sigint = 0;
+	psh_common.sigquit = 0;
+	psh_common.sigstop = 0;
+
+	while ((psh_common.sigint == 0) && (psh_common.sigquit == 0) && (psh_common.sigstop == 0)) {
+		/* sleep() returns 0 when uninterrupted, or the remaining seconds
+		 * when interrupted by a signal. Either way we loop back to the
+		 * top and re-check the signal flags so Ctrl-C exits cleanly
+		 * rather than restarting the next interval. */
+		(void)sleep(interval);
+
+		/* Recheck after sleep — psh_signalint set the flag asynchronously
+		 * while we were blocked in nsleep. */
+		if ((psh_common.sigint != 0) || (psh_common.sigquit != 0) || (psh_common.sigstop != 0)) {
+			break;
+		}
 
 		int ctcnt = psh_pm_getThreads(&ctinfo, &ctsize);
 		if (ctcnt < 0) {
