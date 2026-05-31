@@ -13,12 +13,33 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <unistd.h>
 
 #include <sys/file.h>
 #include <sys/msg.h>
 #include <sys/stat.h>
 
 #include "../psh.h"
+
+
+/* The kernel spawns syspage programs concurrently, so a boot-time bind
+ * (e.g. `bind devfs /dev`) can run before its source (devfs) or target
+ * (/dev) is registered. Retry the lookups like create_dev does instead of
+ * failing the bind and leaving the target directory unforwarded. */
+#define BIND_LOOKUP_RETRIES  30
+#define BIND_LOOKUP_DELAY_US 100000
+
+
+static int psh_bindLookup(const char *name, oid_t *oid)
+{
+	int retry, err;
+
+	for (retry = 0; ((err = lookup(name, NULL, oid)) < 0) && (retry < BIND_LOOKUP_RETRIES); retry++) {
+		usleep(BIND_LOOKUP_DELAY_US);
+	}
+
+	return err;
+}
 
 
 void psh_bindinfo(void)
@@ -39,10 +60,10 @@ int psh_bind(int argc, char **argv)
 		return -EINVAL;
 	}
 
-	if (lookup(argv[1], NULL, &soid) < 0)
+	if (psh_bindLookup(argv[1], &soid) < 0)
 		return -ENOENT;
 
-	if (lookup(argv[2], NULL, &doid) < 0)
+	if (psh_bindLookup(argv[2], &doid) < 0)
 		return -ENOENT;
 
 	if ((err = stat(argv[2], &buf)))
