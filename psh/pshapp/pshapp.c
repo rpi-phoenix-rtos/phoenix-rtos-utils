@@ -46,6 +46,8 @@
 #define CMDSZ        128       /* Command buffer size */
 #define HISTSZ       512       /* Command history size */
 
+/* TODO(TD-14-psh-retry): raised for Pi 4's slow devfs registration path;
+ * restore to upstream default (20 × 100 ms = 2 s) once devfs is fast. */
 #ifndef PSH_TTYOPEN_RETRIES
 #define PSH_TTYOPEN_RETRIES 50
 #endif
@@ -1293,16 +1295,26 @@ static int psh_streamRestore(struct psh_redir *redir)
 	return err;
 }
 
+/* The root filesystem can be registered slightly after psh is spawned: syspage
+ * programs start concurrently, and on targets where `/` is a mounted device
+ * (e.g. rpi4b's ext2 root from the SD storage driver) the mount completes in a
+ * sibling process. Retry the script open so `psh -i /etc/rc.psh` waits for the
+ * rootfs instead of failing the whole init. Mirrors the bind/ttyopen retries. */
+#define PSH_RUNSCRIPT_RETRIES  50
+#define PSH_RUNSCRIPT_RETRY_US 100000
+
 static int psh_runscript(char *path)
 {
 	static const char *scriptCmds[] = { "export", "unset" };
 	char **argv = NULL, *line = NULL;
 	int i, err = 0, argc = 0;
 	size_t n = 0;
-	FILE *stream;
+	FILE *stream = NULL;
 	pid_t pid;
 
-	stream = fopen(path, "r");
+	for (i = 0; ((stream = fopen(path, "r")) == NULL) && (i < PSH_RUNSCRIPT_RETRIES); i++) {
+		usleep(PSH_RUNSCRIPT_RETRY_US);
+	}
 	if (stream == NULL) {
 		fprintf(stderr, "psh: failed to open file %s\n", path);
 		return -EINVAL;
