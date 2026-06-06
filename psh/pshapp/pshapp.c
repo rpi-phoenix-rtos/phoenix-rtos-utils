@@ -27,7 +27,6 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-#include <sys/debug.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>

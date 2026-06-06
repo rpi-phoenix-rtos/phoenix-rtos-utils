@@ -20,7 +20,6 @@
 #include <termios.h>
 #include <unistd.h>
 
-#include <sys/debug.h>
 #include <sys/msg.h>
 #include <sys/pwman.h>
 
@@ -177,17 +176,14 @@ int main(int argc, char **argv)
 	oid_t oid;
 	const psh_appentry_t *app;
 	int err = EOK;
-	unsigned int rootRetries = 0;
 	unsigned int ispshlogin;
 
 	keepidle(1);
 
 	/* Wait for root filesystem */
 	while (lookup("/", NULL, &oid) < 0) {
-		rootRetries++;
 		usleep(10000);
 	}
-	(void)rootRetries;
 
 	/* Check if its first shell */
 	psh_common.tcpid = tcgetpgrp(STDIN_FILENO);
