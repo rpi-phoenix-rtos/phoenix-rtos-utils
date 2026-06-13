@@ -179,8 +179,8 @@ int main(int argc, char **argv)
 
 	nfs_set_version(nfs, NFS_V4);
 	nfs_set_timeout(nfs, 5000);
-	nfs_set_readmax(nfs, 32 * 1024);
-	nfs_set_writemax(nfs, 32 * 1024);
+	nfs_set_readmax(nfs, 1024 * 1024);   /* match the fs server (srv.c) for a realistic throughput number */
+	nfs_set_writemax(nfs, 1024 * 1024);
 
 	uint64_t tm0 = now_ms();
 	int mrc = nfs_mount(nfs, srv, exp);
@@ -253,6 +253,63 @@ int main(int argc, char **argv)
 	}
 	else {
 		fprintf(stderr, "%s: creat marker failed: %s\n", TAG, nfs_get_error(nfs));
+	}
+
+	/* --- FS HEALTH micro-benchmark (boot-time): RPC round-trip latency + read throughput.
+	 * Prints one line per boot so a glance shows whether the FS is performing normally or
+	 * DEGRADED (stale NFSv4 server state, v4 grace period, link trouble). Latency is the key
+	 * regression detector on this latency-bound link; throughput needs a sizable file. */
+	{
+		struct nfs_stat_64 st;
+		int i, statok = 1;
+		const int N = 50;
+		uint64_t b0 = now_ms();
+		for (i = 0; i < N; i++) {
+			if (nfs_lstat64(nfs, file, &st) != 0) {
+				statok = 0;
+				break;
+			}
+		}
+		uint64_t b1 = now_ms();
+		double us_per_rpc = statok ? ((double)(b1 - b0) * 1000.0 / (double)N) : -1.0;
+
+		double mbps = -1.0;
+		long total = 0;
+		static const char *bigcands[] = { "/id1/pak0.pak", "/nfstest/id1/pak0.pak", NULL };
+		int ci;
+		for (ci = 0; bigcands[ci] != NULL; ci++) {
+			struct nfsfh *bf = NULL;
+			if (nfs_open(nfs, bigcands[ci], O_RDONLY, &bf) == 0) {
+				static char rbuf[256 * 1024];
+				long targ = 2 * 1024 * 1024;
+				uint64_t r0 = now_ms();
+				while (total < targ) {
+					int rn = nfs_pread(nfs, bf, rbuf, sizeof(rbuf), (uint64_t)total);
+					if (rn <= 0) {
+						break;
+					}
+					total += rn;
+				}
+				uint64_t r1 = now_ms();
+				nfs_close(nfs, bf);
+				if (total > 0 && r1 > r0) {
+					mbps = ((double)total / 1e6) / ((double)(r1 - r0) / 1000.0);
+				}
+				break;
+			}
+		}
+
+		/* thresholds (tunable): a healthy RPC round-trip on this link is a few ms; >20 ms/op
+		 * or <1.5 MB/s (when a big file exists) flags a degraded FS. */
+		int healthy = (us_per_rpc >= 0.0 && us_per_rpc < 20000.0) && (mbps < 0.0 || mbps > 1.5);
+		if (mbps >= 0.0) {
+			printf("%s: FSHEALTH rpc=%.0f us/op  read=%.2f MB/s (%ld B)  -> %s\n",
+			       TAG, us_per_rpc, mbps, total, healthy ? "HEALTHY" : "DEGRADED");
+		}
+		else {
+			printf("%s: FSHEALTH rpc=%.0f us/op  read=n/a(no big file)  -> %s\n",
+			       TAG, us_per_rpc, healthy ? "HEALTHY" : "DEGRADED");
+		}
 	}
 
 	nfs_destroy_context(nfs);
