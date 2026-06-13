@@ -179,6 +179,7 @@ int main(int argc, char **argv)
 
 	nfs_set_version(nfs, NFS_V4);
 	nfs_set_timeout(nfs, 5000);
+	nfs_set_poll_timeout(nfs, 1);        /* default 100ms; Phoenix poll() blocks the full timeout -> 100ms/RPC */
 	nfs_set_readmax(nfs, 1024 * 1024);   /* match the fs server (srv.c) for a realistic throughput number */
 	nfs_set_writemax(nfs, 1024 * 1024);
 
