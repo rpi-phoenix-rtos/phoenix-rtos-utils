@@ -177,6 +177,13 @@ int main(int argc, char **argv)
 		return 3;
 	}
 
+	/* #156: stable, role-distinct NFSv4 client id (see srv.c nfs_makeContext).
+	 * libnfs's default pid+time id changes every boot, so the server keeps this
+	 * diagnostic's stale lease ~90 s after each run; a fixed id lets a reboot
+	 * replace it, and the distinct role avoids colliding with the nfs-fs server's
+	 * client on this same host. */
+	nfs4_set_client_name(nfs, "phoenix-rpi4-nfssmoke");
+
 	nfs_set_version(nfs, NFS_V4);
 	nfs_set_timeout(nfs, 5000);
 	nfs_set_poll_timeout(nfs, 1);        /* default 100ms; Phoenix poll() blocks the full timeout -> 100ms/RPC */
@@ -228,6 +235,9 @@ int main(int argc, char **argv)
 	/* Write half: create a marker, write, read back, compare. */
 	struct nfsfh *wfh = NULL;
 	const char *marker = "phoenix-nfs-smoke-OK\n";
+	/* The marker persists on the export from a prior boot, so a plain creat fails
+	 * with NFS4ERR_EXIST. Remove it first (ignore errors) so each run starts clean. */
+	(void)nfs_unlink(nfs, "/nfs-smoke-marker.txt");
 	if (nfs_creat(nfs, "/nfs-smoke-marker.txt", 0644, &wfh) == 0) {
 		int wn = nfs_pwrite(nfs, wfh, (void *)marker, strlen(marker), 0);
 		nfs_close(nfs, wfh);
