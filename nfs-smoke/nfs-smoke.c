@@ -323,6 +323,42 @@ int main(int argc, char **argv)
 		}
 	}
 
+	/* --- WRITE throughput micro-benchmark: 4 MB to a scratch file via direct libnfs
+	 * nfs_pwrite (the working write path; the nfs-fs VFS write bridge is a separate
+	 * known issue). Mirrors the read FSHEALTH so we track read AND write MB/s. --- */
+	{
+		struct nfsfh *wf = NULL;
+		double wmbps = -1.0;
+		long wtotal = 0;
+		(void)nfs_unlink(nfs, "/nfs-smoke-wtest.dat");
+		if (nfs_creat(nfs, "/nfs-smoke-wtest.dat", 0644, &wf) == 0) {
+			static char wbuf[256 * 1024];
+			long wtarg = 4 * 1024 * 1024;
+			uint64_t w0, w1;
+			memset(wbuf, 0xa5, sizeof(wbuf));
+			w0 = now_ms();
+			while (wtotal < wtarg) {
+				int wn2 = nfs_pwrite(nfs, wf, wbuf, sizeof(wbuf), (uint64_t)wtotal);
+				if (wn2 <= 0) {
+					break;
+				}
+				wtotal += wn2;
+			}
+			w1 = now_ms();
+			nfs_close(nfs, wf);
+			if (wtotal > 0 && w1 > w0) {
+				wmbps = ((double)wtotal / 1e6) / ((double)(w1 - w0) / 1000.0);
+			}
+			(void)nfs_unlink(nfs, "/nfs-smoke-wtest.dat");
+		}
+		if (wmbps >= 0.0) {
+			printf("%s: WHEALTH write=%.2f MB/s (%ld B)\n", TAG, wmbps, wtotal);
+		}
+		else {
+			printf("%s: WHEALTH write=n/a (creat/pwrite failed: %s)\n", TAG, nfs_get_error(nfs));
+		}
+	}
+
 	nfs_destroy_context(nfs);
 	printf("%s: DONE (overall PASS if READ ok + WRITE ok above)\n", TAG);
 	return 0;
