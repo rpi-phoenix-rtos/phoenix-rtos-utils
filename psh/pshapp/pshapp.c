@@ -695,9 +695,16 @@ static int psh_readcmd(struct termios *orig, psh_hist_t *cmdhist, char **cmd)
 					(void)psh_write(STDOUT_FILENO, "\b", 1);
 					n--;
 					memmove(*cmd + n, *cmd + n + 1, m);
-					(void)psh_write(STDOUT_FILENO, CSI_CLEAR0, sizeof(CSI_CLEAR0) - 1u);
+					/* Console-agnostic erase: reprint the shifted tail, then a
+					 * single space to wipe the now-stale last column, then move
+					 * the cursor back over (tail + that space). Avoids ESC[0J
+					 * (CSI_CLEAR0) — the Pi4 fbcon console mishandles erase-in-
+					 * display and blanks the WHOLE line, so backspace looked like
+					 * it cleared everything while the buffer kept the text (#147).
+					 * Only the cursor-move escapes ([C/[D) are used, which work. */
 					(void)psh_write(STDOUT_FILENO, *cmd + n, m);
-					psh_movecursor(n + m + sizeof(PROMPT) - 1, -m);
+					(void)psh_write(STDOUT_FILENO, " ", 1);
+					psh_movecursor(n + m + sizeof(PROMPT), -(m + 1));
 				}
 			}
 			/* TAB => autocomplete paths */
