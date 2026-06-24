@@ -313,10 +313,9 @@ static void psh_printhistent(psh_histent_t *entry)
 
 static int psh_completepath(char *dir, char *base, char ***files)
 {
-	size_t i, size = 32, dlen = strlen(dir), blen = strlen(base);
+	size_t i, size = 32, blen = strlen(base);
 	int nfiles = 0, err = 0;
-	char *path, **rfiles;
-	struct stat st;
+	char **rfiles;
 	DIR *stream;
 
 	*files = NULL;
@@ -324,9 +323,6 @@ static int psh_completepath(char *dir, char *base, char ***files)
 	do {
 		if ((stream = opendir(dir)) == NULL)
 			break;
-
-		if (dir[dlen - 1] != '/')
-			dir[dlen++] = '/';
 
 		if ((*files = malloc(size * sizeof(char *))) == NULL) {
 			fprintf(stderr, "\r\npsh: out of memory\r\n");
@@ -340,22 +336,6 @@ static int psh_completepath(char *dir, char *base, char ***files)
 
 			if (!blen && (!strcmp(stream->dirent->d_name, ".") || !strcmp(stream->dirent->d_name, "..")))
 				continue;
-
-			i = dlen + stream->dirent->d_namlen;
-			if ((path = malloc(i + 1)) == NULL) {
-				fprintf(stderr, "\r\npsh: out of memory\r\n");
-				err = -ENOMEM;
-				break;
-			}
-			memcpy(path, dir, dlen);
-			strcpy(path + dlen, stream->dirent->d_name);
-
-			if ((err = stat(path, &st)) < 0) {
-				fprintf(stderr, "\r\npsh: can't stat %s\r\n", path);
-				free(path);
-				break;
-			}
-			free(path);
 
 			if (nfiles == size) {
 				if ((rfiles = realloc(*files, 2 * size * sizeof(char *))) == NULL) {
@@ -373,7 +353,11 @@ static int psh_completepath(char *dir, char *base, char ***files)
 				break;
 			}
 			memcpy((*files)[nfiles], stream->dirent->d_name, stream->dirent->d_namlen);
-			(*files)[nfiles][stream->dirent->d_namlen] = (S_ISDIR(st.st_mode)) ? '/' : ' ';
+			/* Classify via readdir's d_type, NOT a per-entry stat(): on an NFS mount each
+			 * stat() is a blocking RPC, and a single stalled RPC hangs the shell mid-TAB-
+			 * complete (user-reported on /nfstest). d_type needs no extra I/O; if the fs
+			 * didn't supply it (DT_UNKNOWN) we fall back to the file marker ' '. */
+			(*files)[nfiles][stream->dirent->d_namlen] = (stream->dirent->d_type == DT_DIR) ? '/' : ' ';
 			(*files)[nfiles][stream->dirent->d_namlen + 1] = '\0';
 			nfiles++;
 		}
