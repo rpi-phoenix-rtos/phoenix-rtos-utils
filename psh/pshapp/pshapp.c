@@ -1810,6 +1810,14 @@ int psh_pshapp(int argc, char **argv)
 		(void)setenv("PATH", "/bin:/usr/bin:/sbin:/usr/sbin", 1);
 	}
 
+	/* Full-screen TUI apps (nano, vi, ...) via ncurses/termcap need TERM. The
+	 * HDMI fbcon + UART console understand the standard ANSI/VT100 control set
+	 * (incl. SGR colour), so default to "linux" when unset; psh has no inline
+	 * `VAR=val cmd` syntax, so a sane default here saves a manual export. */
+	if (getenv("TERM") == NULL) {
+		(void)setenv("TERM", "linux", 1);
+	}
+
 	/* Run shell script */
 	if (argc > 1) {
 		while ((c = getopt(argc, argv, "t:i:h")) != -1) {
