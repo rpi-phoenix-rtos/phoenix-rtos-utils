@@ -355,7 +355,7 @@ static int psh_completepath(char *dir, char *base, char ***files)
 			memcpy((*files)[nfiles], stream->dirent->d_name, stream->dirent->d_namlen);
 			/* Classify via readdir's d_type, NOT a per-entry stat(): on an NFS mount each
 			 * stat() is a blocking RPC, and a single stalled RPC hangs the shell mid-TAB-
-			 * complete (user-reported on /nfstest). d_type needs no extra I/O; if the fs
+			 * complete (user-reported on /mnt). d_type needs no extra I/O; if the fs
 			 * didn't supply it (DT_UNKNOWN) we fall back to the file marker ' '. */
 			(*files)[nfiles][stream->dirent->d_namlen] = (stream->dirent->d_type == DT_DIR) ? '/' : ' ';
 			(*files)[nfiles][stream->dirent->d_namlen + 1] = '\0';

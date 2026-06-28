@@ -286,7 +286,7 @@ int main(int argc, char **argv)
 
 		double mbps = -1.0;
 		long total = 0;
-		static const char *bigcands[] = { "/id1/pak0.pak", "/nfstest/id1/pak0.pak", NULL };
+		static const char *bigcands[] = { "/usr/share/quake/id1/pak0.pak", "/id1/pak0.pak", NULL };
 		int ci;
 		for (ci = 0; bigcands[ci] != NULL; ci++) {
 			struct nfsfh *bf = NULL;
