@@ -1800,6 +1800,16 @@ int psh_pshapp(int argc, char **argv)
 
 	optind = 0;
 
+	/* External commands are run by searching PATH (libphoenix's execve does
+	 * the search, but only when PATH is set). A psh launched directly from
+	 * plo — e.g. the NFS-root console shell — inherits no environment, so a
+	 * bare command name like `startx` fails even though /bin/startx exists.
+	 * Default PATH when unset so command-by-name works; an inherited PATH
+	 * (sub-shells, `psh -i` rc scripts that export it) is left untouched. */
+	if (getenv("PATH") == NULL) {
+		(void)setenv("PATH", "/bin:/usr/bin:/sbin:/usr/sbin", 1);
+	}
+
 	/* Run shell script */
 	if (argc > 1) {
 		while ((c = getopt(argc, argv, "t:i:h")) != -1) {
