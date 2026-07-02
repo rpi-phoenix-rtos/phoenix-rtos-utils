@@ -6,4 +6,11 @@
 # Copyright 2026 Phoenix Systems
 #
 
-DEFAULT_COMPONENTS := psh nfs-smoke
+# nfs-smoke is intentionally NOT a default component: it links the libnfs PORT
+# (-lnfs, <nfsc/libnfs.h>), which is built AFTER core (build.sh: core -> ports).
+# Listing it here made a clean/cold-sysroot core build require the not-yet-built
+# port. It is a netboot-only NFS triage probe, so the aarch64a72-generic-rpi4b
+# project's b_build_project builds it (via `make ... nfs-smoke nfs-smoke-install`)
+# in the project stage for the netboot variant only. The `nfs-smoke` target still
+# exists here (nfs-smoke/Makefile via the ALL_MAKES glob) for that post-ports build.
+DEFAULT_COMPONENTS := psh
