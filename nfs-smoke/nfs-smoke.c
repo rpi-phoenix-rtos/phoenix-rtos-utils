@@ -205,6 +205,7 @@ int main(int argc, char **argv)
 		nfs_set_timeout(nfs, 5000);
 		if (nfs_mount(nfs, srv, "/srv/phoenix-rpi4-nfs") != 0) {
 			fprintf(stderr, "%s: FAIL v3 mount also failed: %s\n", TAG, nfs_get_error(nfs));
+			nfs_destroy_context(nfs);
 			return 4;
 		}
 		printf("%s: mounted via NFSv3 fallback\n", TAG);
