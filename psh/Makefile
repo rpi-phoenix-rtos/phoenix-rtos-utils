@@ -22,7 +22,7 @@ endif
 LOCAL_LDFLAGS := -z stack-size=4096 -z noexecstack
 
 # TODO: search for dirs?
-PSH_ALLCOMMANDS := bind cat cd chmod cp date dd df dmesg echo edit exec hm hd \
+PSH_ALLCOMMANDS := bind cat cd chmod cp cpuburn date dd df dmesg echo edit exec hm hd \
 ifconfig kill ln logread ls mem mkdir mount mv nc nslookup ntpclient perf ping pm printenv \
 ps pwd reboot rm rmdir runfile route sync sysexec top touch tty umount uname uptime wget
 PSH_COMMANDS ?= $(PSH_ALLCOMMANDS)

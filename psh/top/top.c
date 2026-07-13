@@ -28,9 +28,14 @@
 #include "../psh.h"
 
 
+/* Upper bound on cores shown in the per-core summary. The active count is
+ * derived from the highest cpuId observed in threadinfo, or fixed via -c. */
+#define PSH_TOP_MAX_NCPU 16
+
 static struct {
 	int sortdir;
 	int threads;
+	int ncpu; /* number of CPU cores to summarize (-c override, else derived) */
 	int (*cmp)(const void *, const void *);
 } psh_top_common;
 
@@ -68,7 +73,9 @@ static void psh_top_help(void)
 	printf("  -h:  prints help\n");
 	printf("  -H:  starts with threads mode\n");
 	printf("  -d:  sets refresh rate (integer greater than 0)\n");
-	printf("  -n:  sets number of iterations (by default its infinity)\n\n");
+	printf("  -n:  sets number of iterations (by default its infinity)\n");
+	printf("  -c:  fixes the number of CPU cores shown in the per-core summary\n");
+	printf("       (default: highest core id observed)\n\n");
 	printf("Interactive commands:\n");
 	printf("   <ENTER> or <SPACE>:  refresh\n");
 	printf("   H:  toggle threads mode\n");
@@ -125,6 +132,8 @@ static void psh_top_refresh(char cmd, threadinfo_t *info, threadinfo_t *previnfo
 	static unsigned int prevcnt = 0;
 	unsigned int i, j, m, s, hs, w, lines = 3, runcnt = 0, waitcnt = 0;
 	char buff[8];
+	int coreLoad[PSH_TOP_MAX_NCPU] = { 0 };
+	int ncpu = psh_top_common.ncpu;
 
 	/* Calculate load */
 	for (i = 0; i < totcnt; i++) {
@@ -139,6 +148,29 @@ static void psh_top_refresh(char cmd, threadinfo_t *info, threadinfo_t *previnfo
 		/* Prevent negative load if a new thread with the same tid has occured */
 		if (p)
 			info[i].load = (info[i].cpuTime > p->cpuTime) ? (info[i].cpuTime - p->cpuTime) * 1000 / delta : 0;
+	}
+
+	/* Per-core busy load: sum each thread's load into its last-run core bucket.
+	 * Must run on the raw per-thread data, before the process-collapse below
+	 * destroys per-thread cpuId. The idle thread ([idle]) is excluded so an
+	 * idle core reads ~0% rather than ~100%. If no -c override was given, size
+	 * the view to the highest cpuId actually observed. */
+	if (psh_top_common.ncpu <= 0) {
+		ncpu = 1;
+		for (i = 0; i < totcnt; i++) {
+			if (info[i].cpuId + 1 > ncpu)
+				ncpu = info[i].cpuId + 1;
+		}
+	}
+	if (ncpu > PSH_TOP_MAX_NCPU)
+		ncpu = PSH_TOP_MAX_NCPU;
+
+	for (i = 0; i < totcnt; i++) {
+		if (info[i].cpuId < 0 || info[i].cpuId >= ncpu)
+			continue;
+		if (strcmp(info[i].name, "[idle]") == 0)
+			continue;
+		coreLoad[info[i].cpuId] += info[i].load;
 	}
 
 	prevcnt = totcnt;
@@ -189,22 +221,43 @@ static void psh_top_refresh(char cmd, threadinfo_t *info, threadinfo_t *previnfo
 
 	printf("%d total, running: %d, sleeping: %d\n", totcnt, runcnt, waitcnt);
 
+	/* Per-core CPU utilization summary (busy load per core, idle excluded).
+	 * load is per-mille of wall-clock => percent = load / 10 (capped at 100). */
+	printf("\033[K");
+	for (i = 0; i < (unsigned int)ncpu; i++) {
+		int pct = coreLoad[i] / 10;
+		if (pct > 100)
+			pct = 100;
+		printf("CPU%u [%3d%%] ", i, pct);
+	}
+	printf("\n");
+	lines++;
+
 	if (cmd)
 		printf("Unknown command: %c\n", cmd);
 	else
 		printf("\033[K\n");
 
-	/* Set CMD field width */
-	if (ws.ws_col > 61) {
-		w = ws.ws_col - 61;
-	}
-	else {
-		w = 0;
+	/* Set CMD field width. In threads mode an extra 4-char "CPU" column
+	 * (which core the thread last ran on) is inserted before CMD. */
+	{
+		unsigned int fixed = (psh_top_common.threads) ? 65 : 61;
+		if (ws.ws_col > fixed) {
+			w = ws.ws_col - fixed;
+		}
+		else {
+			w = 0;
+		}
 	}
 
 	/* Set header style */
 	printf("\033[0;30;47m");
-	printf("%8s %8s %2s %5s %5s %7s %10s %8s %-*.*s", (psh_top_common.threads) ? "TID" : "PID", "PPID", "PR", "STATE", "%CPU", "WAIT", "TIME", "VMEM", w, w, "CMD");
+	if (psh_top_common.threads) {
+		printf("%8s %8s %2s %5s %5s %7s %10s %8s %3s %-*.*s", "TID", "PPID", "PR", "STATE", "%CPU", "WAIT", "TIME", "VMEM", "CPU", w, w, "CMD");
+	}
+	else {
+		printf("%8s %8s %2s %5s %5s %7s %10s %8s %-*.*s", "PID", "PPID", "PR", "STATE", "%CPU", "WAIT", "TIME", "VMEM", w, w, "CMD");
+	}
 
 	/* Reset style */
 	printf("\033[0m");
@@ -225,6 +278,9 @@ static void psh_top_refresh(char cmd, threadinfo_t *info, threadinfo_t *previnfo
 
 		psh_prefix(2, info[i].vmem, 0, 1, buff);
 		printf("%8s ", buff);
+		if (psh_top_common.threads) {
+			printf("%3d ", info[i].cpuId);
+		}
 		printf("%-*.*s", w, w, info[i].name);
 
 		printf("\033[0m");
@@ -267,12 +323,24 @@ int psh_top(int argc, char **argv)
 
 	psh_top_common.threads = 0;
 	psh_top_common.sortdir = -1;
+	psh_top_common.ncpu = 0; /* 0 => derive from observed cpuId values */
 	psh_top_common.cmp = psh_top_cmpcpu;
 
-	while ((c = getopt(argc, argv, "Hd:n:h")) != -1) {
+	while ((c = getopt(argc, argv, "Hd:n:c:h")) != -1) {
 		switch (c) {
 		case 'H':
 			psh_top_common.threads = 1;
+			break;
+
+		case 'c':
+			psh_top_common.ncpu = strtoul(optarg, &end, 10);
+			if (*end != '\0' || psh_top_common.ncpu <= 0) {
+				fprintf(stderr, "top: -c option requires integer greater than 0\n");
+				return -EINVAL;
+			}
+			if (psh_top_common.ncpu > PSH_TOP_MAX_NCPU) {
+				psh_top_common.ncpu = PSH_TOP_MAX_NCPU;
+			}
 			break;
 
 		case 'd':
