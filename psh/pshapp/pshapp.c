@@ -1580,6 +1580,7 @@ static int psh_run(int exitable, const char *console)
 	char *tmp, *cmd, **argv;
 	int cnt, err, argc, retries;
 	pid_t pgrp;
+	sigset_t mask;
 
 	/* Upstream behaviour: give klog/dmesg time to drain to the terminal
 	 * before psh takes over the shared console. Originally a flat sleep(1)
@@ -1610,15 +1611,10 @@ static int psh_run(int exitable, const char *console)
 		}
 	}
 
-	/* Wait till we run in foreground */
-	if (tcgetpgrp(STDIN_FILENO) != -1) {
-		for (;;) {
-			pgrp = tcgetpgrp(STDIN_FILENO);
-			if (pgrp == getpgrp()) {
-				break;
-			}
-
-			if (kill(-pgrp, SIGTTIN) == 0) {
+	if (sigprocmask(SIG_BLOCK, NULL, &mask) == 0 && sigismember(&mask, SIGTTIN)) {
+		/* Wait till we run in foreground */
+		while ((pgrp = tcgetpgrp(STDIN_FILENO)) != -1 && pgrp != getpgrp()) {
+			if (kill(0, SIGTTIN) == -1) {
 				break;
 			}
 		}
