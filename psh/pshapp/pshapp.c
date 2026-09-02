@@ -25,6 +25,7 @@
 #include <string.h>
 #include <termios.h>
 #include <unistd.h>
+#include <time.h>
 #include <fcntl.h>
 
 #include <sys/file.h>
@@ -1592,6 +1593,60 @@ static void psh_signalstop(int sig)
 }
 
 
+/* Set the wall clock from the network when a session starts, if it looks unset.
+ *
+ * The Pi4 has no RTC, so without this time() starts at the epoch -- which
+ * silently breaks TLS (every certificate is "not yet valid") and stamps every
+ * file the system writes with 1970. So a normal user session should just do it.
+ *
+ * Deliberately fire-and-forget: fork, exec ntpclient in the child, and do NOT
+ * wait. An earlier attempt ran this from an rc script that psh waited on, and a
+ * clock step that did not return cost the shell entirely -- a far worse failure
+ * than an unset clock. Here the prompt appears regardless; the child prints
+ * either "System time set to ..." or ntpclient's warning that TLS will fail.
+ *
+ * Skipped when the clock is already plausible (an earlier sync, or a target
+ * with a working RTC), so re-entering a shell does not re-sync.
+ */
+#define PSH_CLOCK_PLAUSIBLE 1735689600 /* 2025-01-01, comfortably before any real use */
+#define PSH_CLOCK_NTPCLIENT  "/bin/ntpclient"
+#define PSH_CLOCK_BINWAIT_S  30 /* wait for /bin to exist (NFS/SD root mount) */
+#define PSH_CLOCK_WINDOW_S   "90" /* ntpclient -w: wait for DHCP + DNS to come up */
+
+static void psh_clockSync(void)
+{
+	pid_t pid;
+	unsigned int i;
+
+	if (time(NULL) >= (time_t)PSH_CLOCK_PLAUSIBLE) {
+		return;
+	}
+
+	/* fork, not vfork: the child has waiting to do before it can exec. */
+	pid = fork();
+	if (pid != 0) {
+		/* Parent, or a fork failure -- nothing to do about the latter. The
+		 * clock stays unset and ntpclient can be run by hand; never fail the
+		 * shell for this. SIGCHLD is SIG_IGN in psh_run, so no zombie. */
+		return;
+	}
+
+	/* The shell can reach its prompt before the rest of the system exists: on
+	 * a netboot/NFS root, /bin is not mounted yet, and lwip has not finished
+	 * DHCP either way. So wait for the binary, then let ntpclient wait for the
+	 * network (-w) rather than failing on the first unresolvable lookup. */
+	for (i = 0; i < PSH_CLOCK_BINWAIT_S; i++) {
+		if (access(PSH_CLOCK_NTPCLIENT, X_OK) == 0) {
+			break;
+		}
+		sleep(1);
+	}
+
+	execl(PSH_CLOCK_NTPCLIENT, "ntpclient", "-w", PSH_CLOCK_WINDOW_S, NULL);
+	_exit(EXIT_FAILURE);
+}
+
+
 static int psh_run(int exitable, const char *console)
 {
 	psh_hist_t *cmdhist = NULL;
@@ -1877,6 +1932,8 @@ int psh_pshapp(int argc, char **argv)
 		}
 	}
 	/* Run shell interactively */
+	psh_clockSync();
+
 	return psh_run(1, psh_common.consolePath) < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 

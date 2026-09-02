@@ -19,6 +19,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <netdb.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../psh.h"
@@ -59,8 +60,22 @@ struct sntp_pkt_s {
 } __attribute__((packed));
 
 
+/* How long to sleep between attempts while -w is still counting down. */
+#define NTP_RETRY_INTERVAL_S 3
+
+/* Set for the whole of a -w window: an unreachable network would otherwise
+ * print one getaddrinfo/socket error per attempt. The single "clock NOT set"
+ * line at the end is the diagnosis the user needs; thirty syscall errors
+ * scrolling past a fresh shell prompt are not. */
+static int ntpclient_silent = 0;
+
+
 static int doError(const char *fName, int err)
 {
+	if (ntpclient_silent != 0) {
+		return err;
+	}
+
 	fprintf(stderr, "ntpclient: %s() failed, err=%d\n", fName, err);
 	return err;
 }
@@ -77,6 +92,7 @@ static uint32_t *aiToAddr(struct addrinfo *ai)
  * unusable from a boot script: the Pi4 boot config runs it before psh, so a
  * hang there would cost the shell. */
 #define NTP_RECV_TIMEOUT_S 5
+
 
 
 static int ntpclient_connect(const char *host, unsigned int timeout)
@@ -98,7 +114,9 @@ static int ntpclient_connect(const char *host, unsigned int timeout)
 		return doError("ntpclient_connect", -EINVAL);
 	}
 
-	printf("Using NTP server: %s\n", host);
+	if (ntpclient_silent == 0) {
+		printf("Using NTP server: %s\n", host);
+	}
 
 	ret = getaddrinfo(host, "123", &hints, &res);
 	if (ret != 0) {
@@ -241,6 +259,27 @@ static int ntpclient_settime(struct sntp_pkt_s *pkt)
 }
 
 
+/* One full attempt: resolve, exchange, set the clock. Returns EOK or -errno. */
+static int ntpclient_syncOnce(const char *host, unsigned int timeout)
+{
+	struct sntp_pkt_s pkt;
+	int sockfd, err;
+
+	sockfd = ntpclient_connect(host, timeout);
+	if (sockfd < 0) {
+		return sockfd;
+	}
+
+	err = ntpclient_gettimepacket(sockfd, &pkt);
+	close(sockfd);
+	if (err < 0) {
+		return err;
+	}
+
+	return ntpclient_settime(&pkt);
+}
+
+
 static void psh_ntpclientInfo(void)
 {
 	printf("set the system's date from a remote host");
@@ -250,21 +289,70 @@ static void psh_ntpclientUsage(void)
 {
 	printf("Usage: ntpclient [options]\n"
 		   "  -h:  prints help\n"
-		   "  -s:  specify ntp server address\n"
-		   "  -t:  seconds to wait for the reply (default %u, 0 waits forever)\n",
+		   "  -s:  ntp server address (default: /etc/ntp.conf, else pool.ntp.org)\n"
+		   "  -t:  seconds to wait for the reply (default %u, 0 waits forever)\n"
+		   "  -w:  keep retrying for this many seconds before giving up (default 0,\n"
+		   "       i.e. a single attempt) -- use it when the network may still be\n"
+		   "       coming up, e.g. right after boot\n",
 		NTP_RECV_TIMEOUT_S);
+}
+
+
+/* Read the server from /etc/ntp.conf when -s was not given: one `server=<host>`
+ * line (or a bare hostname), '#' comments and surrounding whitespace ignored.
+ * Mirrors the /etc/wifi.conf convention so a shipped image can be configured
+ * without editing the boot script. */
+static int ntpclient_confServer(char *out, size_t outsz)
+{
+	FILE *f = fopen("/etc/ntp.conf", "r");
+	char line[160];
+	int got = -1;
+
+	if (f == NULL) {
+		return -1;
+	}
+
+	while (fgets(line, sizeof(line), f) != NULL) {
+		char *p = line, *v, *e;
+
+		while ((*p == ' ') || (*p == '\t')) {
+			p++;
+		}
+		if ((*p == '#') || (*p == '\0') || (*p == '\n')) {
+			continue;
+		}
+
+		v = strchr(p, '=');
+		v = (v != NULL) ? (v + 1) : p;
+		while ((*v == ' ') || (*v == '\t')) {
+			v++;
+		}
+		for (e = v + strlen(v) - 1; (e >= v) && ((*e == '\n') || (*e == '\r') || (*e == ' ') || (*e == '\t')); e--) {
+			*e = '\0';
+		}
+		if (*v != '\0') {
+			int n = snprintf(out, outsz, "%s", v);
+			got = ((n > 0) && ((size_t)n < outsz)) ? 0 : -1;
+		}
+		break;
+	}
+
+	fclose(f);
+	return got;
 }
 
 
 static int psh_ntpclientMain(int argc, char **argv)
 {
-	int opt, sockfd;
-	struct sntp_pkt_s pkt;
-	const char *ntp_host = "pool.ntp.org";
+	int opt;
+	char confhost[128];
+	const char *ntp_host = NULL;
 	unsigned int timeout = NTP_RECV_TIMEOUT_S;
+	unsigned long window = 0;
+	time_t deadline;
 	char *end;
 
-	while ((opt = getopt(argc, argv, "s:t:h")) != -1) {
+	while ((opt = getopt(argc, argv, "s:t:w:h")) != -1) {
 		switch (opt) {
 			case 's':
 				ntp_host = optarg;
@@ -280,6 +368,15 @@ static int psh_ntpclientMain(int argc, char **argv)
 				break;
 			}
 
+			case 'w': {
+				window = strtoul(optarg, &end, 10);
+				if ((*end != '\0') || (window > 3600UL)) {
+					fprintf(stderr, "ntpclient: bad wait window '%s'\n", optarg);
+					return EXIT_FAILURE;
+				}
+				break;
+			}
+
 			default:
 				/* fall-through */
 			case 'h':
@@ -288,23 +385,33 @@ static int psh_ntpclientMain(int argc, char **argv)
 		}
 	}
 
-	sockfd = ntpclient_connect(ntp_host, timeout);
-	if (sockfd < 0) {
-		return EXIT_FAILURE;
+	if (ntp_host == NULL) {
+		ntp_host = (ntpclient_confServer(confhost, sizeof(confhost)) == 0) ? confhost : "pool.ntp.org";
 	}
 
-	if (ntpclient_gettimepacket(sockfd, &pkt) < 0) {
-		close(sockfd);
-		return EXIT_FAILURE;
+	/* time() runs from boot when the clock is unset, so it is still a usable
+	 * stopwatch for the window; a successful sync exits before we consult it. */
+	deadline = time(NULL) + (time_t)window;
+	ntpclient_silent = (window > 0UL) ? 1 : 0;
+
+	for (;;) {
+		if (ntpclient_syncOnce(ntp_host, timeout) == EOK) {
+			return EXIT_SUCCESS;
+		}
+
+		if (time(NULL) >= deadline) {
+			break;
+		}
+		sleep(NTP_RETRY_INTERVAL_S);
 	}
 
-	close(sockfd);
+	/* Say what the consequence is, not just that a syscall failed: an unset
+	 * clock silently breaks TLS certificate validity and stamps every file the
+	 * system writes with the epoch. */
+	fprintf(stderr, "ntpclient: clock NOT set (no reply from %s) -- TLS will fail "
+		"and file timestamps will be wrong until it is\n", ntp_host);
 
-	if (ntpclient_settime(&pkt) < 0) {
-		return EXIT_FAILURE;
-	}
-
-	return EXIT_SUCCESS;
+	return EXIT_FAILURE;
 }
 
 
