@@ -125,6 +125,14 @@ static int ntpclient_connect(const char *host, unsigned int timeout)
 			break;
 		}
 
+		/* The send loop had the same unbounded EAGAIN retry as the receive
+		 * loop, so a full socket buffer was its own busy-spin forever. */
+		if (setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) {
+			ret = doError("setsockopt(SO_SNDTIMEO)", -errno);
+			close(sockfd);
+			break;
+		}
+
 		if (connect(sockfd, res->ai_addr, res->ai_addrlen) < 0) {
 			ret = doError("connect", -errno);
 			close(sockfd);
@@ -157,7 +165,12 @@ static int ntpclient_gettimepacket(int sockfd, struct sntp_pkt_s *pkt)
 	while (len > 0) {
 		ssize_t bytes = write(sockfd, ptr, len);
 		if (bytes < 0) {
-			if (errno != EAGAIN && errno != EINTR) {
+			/* SO_SNDTIMEO makes EAGAIN mean the timeout expired; retrying it
+			 * unconditionally (as this did) never terminates. */
+			if (errno == EAGAIN) {
+				return doError("write (send timed out)", -ETIMEDOUT);
+			}
+			if (errno != EINTR) {
 				return doError("write", -errno);
 			}
 			continue;
@@ -166,27 +179,27 @@ static int ntpclient_gettimepacket(int sockfd, struct sntp_pkt_s *pkt)
 		ptr += bytes;
 	}
 
-	len = sizeof(*pkt);
-	ptr = (uint8_t *)pkt;
-	while (len > 0) {
-		ssize_t bytes = read(sockfd, ptr, len);
-		if (bytes < 0) {
-			/* With SO_RCVTIMEO set, EAGAIN is the timeout expiring -- retrying
-			 * it (as this used to, unconditionally) is an endless busy loop
-			 * against a silent server. Only EINTR is worth retrying. */
-			if (errno == EAGAIN) {
-				return doError("read (no reply from server)", -ETIMEDOUT);
-			}
-			if (errno != EINTR) {
-				return doError("read", -errno);
-			}
-			continue;
+	/* One datagram, not a byte loop: this is SOCK_DGRAM, so a reply either
+	 * arrives whole or not at all. Looping meant a short (or empty) packet was
+	 * not an error -- it went back and waited another full timeout for the
+	 * "rest" of a datagram that will never come. */
+	for (;;) {
+		ssize_t bytes = read(sockfd, pkt, sizeof(*pkt));
+		if (bytes == (ssize_t)sizeof(*pkt)) {
+			break;
 		}
-		if (bytes == 0) {
-			return doError("read (connection closed)", -ECONNRESET);
+		if (bytes >= 0) {
+			return doError("read (short reply)", -EPROTO);
 		}
-		len -= bytes;
-		ptr += bytes;
+		/* With SO_RCVTIMEO set, EAGAIN is the timeout expiring -- retrying it
+		 * (as this used to, unconditionally) is an endless busy loop against a
+		 * silent server. Only EINTR is worth retrying. */
+		if (errno == EAGAIN) {
+			return doError("read (no reply from server)", -ETIMEDOUT);
+		}
+		if (errno != EINTR) {
+			return doError("read", -errno);
+		}
 	}
 
 	if ((NTP_MODE(pkt->li_vn_mode) != NTP_MODE_SERVER && NTP_MODE(pkt->li_vn_mode) != NTP_MODE_PASSIVE) || pkt->stratum >= 16) {

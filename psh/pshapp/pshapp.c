@@ -1303,6 +1303,14 @@ static int psh_streamRestore(struct psh_redir *redir)
 #define PSH_RUNSCRIPT_RETRIES  300
 #define PSH_RUNSCRIPT_RETRY_US 100000
 
+/* Distinct from any -errno psh_runscript can otherwise return. It must be: the
+ * caller falls back to an interactive shell on this and only this, and -ENOENT
+ * is NOT unique to a missing script -- psh_ttyopen returns -errno, so the
+ * `T /dev/console` line every shipped rc script carries reports -ENOENT when
+ * devfs is not up yet. Overloading it made a script that had already run report
+ * itself as "unavailable". */
+#define PSH_SCRIPT_NOTOPENED (-0x10000)
+
 static int psh_runscript(char *path)
 {
 	static const char *scriptCmds[] = { "export", "unset" };
@@ -1316,12 +1324,11 @@ static int psh_runscript(char *path)
 		usleep(PSH_RUNSCRIPT_RETRY_US);
 	}
 	if (stream == NULL) {
-		/* -ENOENT specifically: nothing from the script has run, so the caller
-		 * can safely fall back to an interactive shell. Any later failure
-		 * returns a different code, because by then the script may already have
-		 * spawned one and a second would fight it for the console. */
-		fprintf(stderr, "psh: failed to open file %s\n", path);
-		return -ENOENT;
+		/* Nothing from the script has run, so the caller can safely fall back
+		 * to an interactive shell. Any later failure returns an -errno instead,
+		 * because by then the script may already have spawned a shell and a
+		 * second would fight it for the console. */
+		return PSH_SCRIPT_NOTOPENED;
 	}
 
 	for (i = 1;; i++) {
@@ -1863,10 +1870,10 @@ int psh_pshapp(int argc, char **argv)
 			 * board with no way in. Only the "never opened" case falls through;
 			 * a script that ran and failed part-way may already have spawned a
 			 * shell of its own. */
-			if (err != -ENOENT) {
+			if (err != PSH_SCRIPT_NOTOPENED) {
 				return (err < 0) ? EXIT_FAILURE : EXIT_SUCCESS;
 			}
-			fprintf(stderr, "psh: %s unavailable, starting an interactive shell\n", path);
+			fprintf(stderr, "psh: cannot open %s, starting an interactive shell instead\n", path);
 		}
 	}
 	/* Run shell interactively */
