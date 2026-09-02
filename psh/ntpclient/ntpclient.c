@@ -61,7 +61,7 @@ struct sntp_pkt_s {
 
 static int doError(const char *fName, int err)
 {
-	fprintf(stderr, "netclient: %s() failed, err=%d\n", fName, err);
+	fprintf(stderr, "ntpclient: %s() failed, err=%d\n", fName, err);
 	return err;
 }
 
@@ -72,12 +72,21 @@ static uint32_t *aiToAddr(struct addrinfo *ai)
 }
 
 
-static int ntpclient_connect(const char *host)
+/* Default seconds to wait for the server's reply. Without a bound, an
+ * unreachable or silent server blocks read() forever, which makes ntpclient
+ * unusable from a boot script: the Pi4 boot config runs it before psh, so a
+ * hang there would cost the shell. */
+#define NTP_RECV_TIMEOUT_S 5
+
+
+static int ntpclient_connect(const char *host, unsigned int timeout)
+
 {
 	int ret = EOK, sockfd;
 	struct addrinfo *res;
 	struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_DGRAM, .ai_protocol = IPPROTO_UDP };
 	char hostaddr[INET_ADDRSTRLEN];
+	struct timeval tv;
 
 	if (host == NULL) {
 		return doError("ntpclient_connect", -EINVAL);
@@ -102,6 +111,17 @@ static int ntpclient_connect(const char *host)
 		sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
 		if (sockfd < 0) {
 			ret = doError("socket", -errno);
+			break;
+		}
+
+		/* Bound the wait for the reply. SO_RCVTIMEO makes read() fail with
+		 * EAGAIN instead of blocking indefinitely; the read loop turns that
+		 * into -ETIMEDOUT. */
+		tv.tv_sec = (time_t)timeout;
+		tv.tv_usec = 0;
+		if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+			ret = doError("setsockopt(SO_RCVTIMEO)", -errno);
+			close(sockfd);
 			break;
 		}
 
@@ -151,10 +171,19 @@ static int ntpclient_gettimepacket(int sockfd, struct sntp_pkt_s *pkt)
 	while (len > 0) {
 		ssize_t bytes = read(sockfd, ptr, len);
 		if (bytes < 0) {
-			if (errno != EAGAIN && errno != EINTR) {
+			/* With SO_RCVTIMEO set, EAGAIN is the timeout expiring -- retrying
+			 * it (as this used to, unconditionally) is an endless busy loop
+			 * against a silent server. Only EINTR is worth retrying. */
+			if (errno == EAGAIN) {
+				return doError("read (no reply from server)", -ETIMEDOUT);
+			}
+			if (errno != EINTR) {
 				return doError("read", -errno);
 			}
 			continue;
+		}
+		if (bytes == 0) {
+			return doError("read (connection closed)", -ECONNRESET);
 		}
 		len -= bytes;
 		ptr += bytes;
@@ -202,7 +231,9 @@ static void psh_ntpclientUsage(void)
 {
 	printf("Usage: ntpclient [options]\n"
 		   "  -h:  prints help\n"
-		   "  -s:  specify ntp server address\n");
+		   "  -s:  specify ntp server address\n"
+		   "  -t:  seconds to wait for the reply (default %u, 0 waits forever)\n",
+		NTP_RECV_TIMEOUT_S);
 }
 
 
@@ -211,12 +242,24 @@ static int psh_ntpclientMain(int argc, char **argv)
 	int opt, sockfd;
 	struct sntp_pkt_s pkt;
 	const char *ntp_host = "pool.ntp.org";
+	unsigned int timeout = NTP_RECV_TIMEOUT_S;
+	char *end;
 
-	while ((opt = getopt(argc, argv, "s:h")) != -1) {
+	while ((opt = getopt(argc, argv, "s:t:h")) != -1) {
 		switch (opt) {
 			case 's':
 				ntp_host = optarg;
 				break;
+
+			case 't': {
+				unsigned long val = strtoul(optarg, &end, 10);
+				if ((*end != '\0') || (val > 3600UL)) {
+					fprintf(stderr, "ntpclient: bad timeout '%s'\n", optarg);
+					return EXIT_FAILURE;
+				}
+				timeout = (unsigned int)val;
+				break;
+			}
 
 			default:
 				/* fall-through */
@@ -226,7 +269,7 @@ static int psh_ntpclientMain(int argc, char **argv)
 		}
 	}
 
-	sockfd = ntpclient_connect(ntp_host);
+	sockfd = ntpclient_connect(ntp_host, timeout);
 	if (sockfd < 0) {
 		return EXIT_FAILURE;
 	}
