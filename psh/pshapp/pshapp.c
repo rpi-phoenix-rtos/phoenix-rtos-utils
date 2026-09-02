@@ -1286,12 +1286,21 @@ static int psh_streamRestore(struct psh_redir *redir)
 	return err;
 }
 
-/* The root filesystem can be registered slightly after psh is spawned: syspage
+/* The root filesystem can be registered well after psh is spawned: syspage
  * programs start concurrently, and on targets where `/` is a mounted device
  * (e.g. rpi4b's ext2 root from the SD storage driver) the mount completes in a
  * sibling process. Retry the script open so `psh -i /etc/rc.psh` waits for the
- * rootfs instead of failing the whole init. Mirrors the bind/ttyopen retries. */
-#define PSH_RUNSCRIPT_RETRIES  50
+ * rootfs instead of failing the whole init. Mirrors the bind/ttyopen retries.
+ *
+ * 30 s, not the 5 s this used to allow: on an rpi4b booting with its root on
+ * NFS, "/" is first a RAM dummyfs and the NFS server only takes it over after
+ * DHCP, mount and a port re-registration. Measured on hardware, psh reached the
+ * script open first and gave up before the takeover -- "psh: failed to open
+ * file /etc/rc.nfsroot" is printed several lines BEFORE "nfs-fs: registered /
+ * (takeover)" -- which cost the shell entirely. The wait only elapses when the
+ * script really is unreachable, and that case now falls back to an interactive
+ * shell rather than exiting. */
+#define PSH_RUNSCRIPT_RETRIES  300
 #define PSH_RUNSCRIPT_RETRY_US 100000
 
 static int psh_runscript(char *path)
@@ -1307,8 +1316,12 @@ static int psh_runscript(char *path)
 		usleep(PSH_RUNSCRIPT_RETRY_US);
 	}
 	if (stream == NULL) {
+		/* -ENOENT specifically: nothing from the script has run, so the caller
+		 * can safely fall back to an interactive shell. Any later failure
+		 * returns a different code, because by then the script may already have
+		 * spawned one and a second would fight it for the console. */
 		fprintf(stderr, "psh: failed to open file %s\n", path);
-		return -EINVAL;
+		return -ENOENT;
 	}
 
 	for (i = 1;; i++) {
@@ -1843,8 +1856,18 @@ int psh_pshapp(int argc, char **argv)
 		if (optind < argc)
 			path = argv[optind];
 
-		if (path != NULL)
-			return psh_runscript(path) < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+		if (path != NULL) {
+			int err = psh_runscript(path);
+			/* An init script that cannot even be opened must not cost the
+			 * shell -- without this a mistyped or not-yet-mounted path left the
+			 * board with no way in. Only the "never opened" case falls through;
+			 * a script that ran and failed part-way may already have spawned a
+			 * shell of its own. */
+			if (err != -ENOENT) {
+				return (err < 0) ? EXIT_FAILURE : EXIT_SUCCESS;
+			}
+			fprintf(stderr, "psh: %s unavailable, starting an interactive shell\n", path);
+		}
 	}
 	/* Run shell interactively */
 	return psh_run(1, psh_common.consolePath) < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
