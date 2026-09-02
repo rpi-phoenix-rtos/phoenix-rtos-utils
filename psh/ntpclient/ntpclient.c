@@ -84,7 +84,13 @@ static int ntpclient_connect(const char *host, unsigned int timeout)
 {
 	int ret = EOK, sockfd;
 	struct addrinfo *res;
-	struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_DGRAM, .ai_protocol = IPPROTO_UDP };
+	/* AI_NUMERICSERV: the service is already the literal "123", and without
+	 * this the resolver is entitled to look it up in /etc/services -- which on
+	 * a netboot/NFS root is a network file access that the socket timeout below
+	 * cannot bound. A boot that ran this from an rc script then hung before
+	 * reaching the shell. */
+	struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_DGRAM,
+		.ai_protocol = IPPROTO_UDP, .ai_flags = AI_NUMERICSERV };
 	char hostaddr[INET_ADDRSTRLEN];
 	struct timeval tv;
 
