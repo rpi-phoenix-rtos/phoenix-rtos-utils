@@ -6,7 +6,14 @@
  * Arch-neutral — only the launcher line (and server IP) differ per platform.
  *
  * Usage (argv): nfs-smoke [server-ip] [export-path] [file-to-read]
- *   defaults:  10.42.0.1  /  /etc/hostname     (NFSv4, fsid=0 pseudo-root)
+ *   defaults:  10.42.0.1  /  /etc/passwd       (NFSv4, fsid=0 pseudo-root)
+ *
+ * The read target must be a file the export is guaranteed to hold, or the probe
+ * reports a mount-and-read failure that is really a missing test file. It used
+ * to default to /etc/hostname, which NOTHING in the build produces (checked
+ * 2026-09-04: no root-skel entry, no consumer -- libphoenix's gethostname() is
+ * a syscall wrapper, not a file read), so the read step failed on every run.
+ * /etc/passwd comes from root-skel and is present on every Phoenix rootfs.
  *
  * Copyright 2026 Phoenix Systems
  *
@@ -160,7 +167,7 @@ int main(int argc, char **argv)
 {
 	const char *srv = (argc > 1) ? argv[1] : "10.42.0.1";
 	const char *exp = (argc > 2) ? argv[2] : "/";
-	const char *file = (argc > 3) ? argv[3] : "/etc/hostname";
+	const char *file = (argc > 3) ? argv[3] : "/etc/passwd";
 	char ipbuf[64] = "";
 
 	printf("%s: start (server=%s export=%s file=%s)\n", TAG, srv, exp, file);
