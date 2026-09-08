@@ -43,7 +43,28 @@
 /* Shell definitions */
 #define PROMPT       "(psh)% " /* Shell prompt */
 #define SCRIPT_MAGIC ":{}:"    /* Every psh script should start with this line */
-#define CMDSZ        128       /* Command buffer size */
+/* Command buffer size.
+ *
+ * 128 was a SILENT truncation: psh dropped every character past the limit with
+ * no bell, no message and no refusal, then executed the prefix. Found on a Pi 4
+ * when a 167-character game launch line lost its tail, so the engine started
+ * with no map argument and sat in its menu -- the shell reported nothing and the
+ * echoed line looked complete until it was counted. A truncation that silently
+ * changes WHICH command runs is worse than a refusal, so both halves are fixed:
+ * the limit is now large enough for a realistic launch line, and hitting it
+ * rings the bell instead of quietly discarding input.
+ *
+ * Sized per architecture rather than globally: this backs one malloc plus a
+ * static clipboard of the same size, and the NOMMU/MCU targets Phoenix also
+ * builds for should not pay ~2 KiB for a Pi 4 problem. Anything without a known
+ * roomy address space keeps the historical value. */
+#ifndef CMDSZ
+#if defined(__aarch64__) || defined(__x86_64__) || defined(__riscv64) || defined(__riscv_xlen) && (__riscv_xlen == 64)
+#define CMDSZ    1024      /* Command buffer size (64-bit MMU targets) */
+#else
+#define CMDSZ    128        /* Command buffer size */
+#endif
+#endif
 #define HISTSZ       512       /* Command history size */
 
 /* TODO(TD-14-psh-retry): raised for Pi 4's slow devfs registration path;
@@ -896,6 +917,12 @@ static int psh_readcmd(struct termios *orig, psh_hist_t *cmdhist, char **cmd)
 					(*cmd)[n++] = c;
 					(void)psh_write(STDOUT_FILENO, *cmd + n - 1, m + 1);
 					psh_movecursor(n + m + sizeof(PROMPT) - 1, -m);
+				}
+				else {
+					/* Buffer full: make the refusal perceptible. Dropping the
+					 * character silently is how a truncated line came to be
+					 * executed as if complete. */
+					(void)psh_write(STDOUT_FILENO, "\a", 1);
 				}
 				continue;
 			}
