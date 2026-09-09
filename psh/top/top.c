@@ -239,9 +239,12 @@ static void psh_top_refresh(char cmd, threadinfo_t *info, threadinfo_t *previnfo
 		printf("\033[K\n");
 
 	/* Set CMD field width. In threads mode an extra 4-char "CPU" column
-	 * (which core the thread last ran on) is inserted before CMD. */
+	 * (which core the thread last ran on) is inserted before CMD.
+	 *
+	 * 63 is the sum of the fixed header columns below; upstream widened PR from
+	 * 2 to 4 (priority is now [-32,31]), so both figures grew by 2. */
 	{
-		unsigned int fixed = (psh_top_common.threads) ? 65 : 61;
+		unsigned int fixed = (psh_top_common.threads) ? 67 : 63;
 		if (ws.ws_col > fixed) {
 			w = ws.ws_col - fixed;
 		}
@@ -253,10 +256,10 @@ static void psh_top_refresh(char cmd, threadinfo_t *info, threadinfo_t *previnfo
 	/* Set header style */
 	printf("\033[0;30;47m");
 	if (psh_top_common.threads) {
-		printf("%8s %8s %2s %5s %5s %7s %10s %8s %3s %-*.*s", "TID", "PPID", "PR", "STATE", "%CPU", "WAIT", "TIME", "VMEM", "CPU", w, w, "CMD");
+		printf("%8s %8s %4s %5s %5s %7s %10s %8s %3s %-*.*s", "TID", "PPID", "PR", "STATE", "%CPU", "WAIT", "TIME", "VMEM", "CPU", w, w, "CMD");
 	}
 	else {
-		printf("%8s %8s %2s %5s %5s %7s %10s %8s %-*.*s", "PID", "PPID", "PR", "STATE", "%CPU", "WAIT", "TIME", "VMEM", w, w, "CMD");
+		printf("%8s %8s %4s %5s %5s %7s %10s %8s %-*.*s", "PID", "PPID", "PR", "STATE", "%CPU", "WAIT", "TIME", "VMEM", w, w, "CMD");
 	}
 
 	/* Reset style */
@@ -272,9 +275,9 @@ static void psh_top_refresh(char cmd, threadinfo_t *info, threadinfo_t *previnfo
 		m = info[i].cpuTime / (60 * 1000000);
 		s = info[i].cpuTime / 1000000 - 60 * m;
 		hs = info[i].cpuTime / 10000 - 60 * 100 * m - 100 * s;
-		printf("\n%8u %8u %2d %5s %3u.%u %6ss %4u:%02u.%02u ", (psh_top_common.threads) ? info[i].tid : info[i].pid,
-			info[i].ppid, info[i].priority, (info[i].state) ? "sleep" : "ready",
-			info[i].load / 10, info[i].load % 10, buff, m, s, hs);
+		printf("\n%8u %8u %4d %5s %3u.%u %6ss %4u:%02u.%02u ", (psh_top_common.threads) ? info[i].tid : info[i].pid,
+				info[i].ppid, info[i].priority, (info[i].state) ? "sleep" : "ready",
+				info[i].load / 10, info[i].load % 10, buff, m, s, hs);
 
 		psh_prefix(2, info[i].vmem, 0, 1, buff);
 		printf("%8s ", buff);
