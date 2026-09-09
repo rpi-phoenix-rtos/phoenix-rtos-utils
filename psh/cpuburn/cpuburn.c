@@ -37,8 +37,14 @@
 
 /* Lowest usable priority level. The kernel reserves the last ready[] level
  * (MAX_PRIO) for the per-CPU idle thread, so the coarsest a worker may run at
- * is one above that. Phoenix has 8 priority levels (0..7). */
-#define CPUBURN_MIN_PRIORITY 6
+ * is one above that.
+ *
+ * Upstream's !proc change widened the priority space from 8 levels (0..7) to
+ * NPRIOS = 64 (0..63), so this became 62. It is hardcoded because NPRIOS lives
+ * in the kernel's proc/threads.h and is not exposed to userspace; if that ever
+ * changes, derive it from NPRIOS - 2 instead. Getting it wrong is not fatal --
+ * the clamp only stops a worker landing on the idle level. */
+#define CPUBURN_MIN_PRIORITY 62
 
 
 struct cpuburn_ctx;
@@ -198,7 +204,8 @@ static int psh_cpuburn(int argc, char **argv)
 	/* Workers one level BELOW the controller so the controller (and the shell +
 	 * system daemons) always preempt them: the -t deadline and reboot stay
 	 * responsive even with every core saturated. */
-	ctrlPrio = priority(-1);
+	/* priority(-1) was the old query form; the new API splits query and set. */
+	ctrlPrio = getPriority();
 	workerPrio = ctrlPrio + 1;
 	if (workerPrio > CPUBURN_MIN_PRIORITY) {
 		workerPrio = CPUBURN_MIN_PRIORITY;
