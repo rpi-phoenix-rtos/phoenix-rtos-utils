@@ -208,7 +208,27 @@ int main(int argc, char **argv)
 		else {
 			err = PSH_UNKNOWN_CMD;
 			psh_common.exitStatus = err;
-			fprintf(stderr, "psh: %s: unknown command\n", argv[0]);
+			/* Report with write(2), not fprintf.
+			 *
+			 * This path has already taken a Data Abort in the field: `stderr` was
+			 * NULL, so fprintf faulted at FILE.lock (far=0x30) instead of printing
+			 * anything. `stderr` and `psh_common` land in the SAME 4 KiB page of
+			 * .bss (0x438000 in the shipped psh), and in that fault both read
+			 * back zero -- which is why the applet lookup missed in the first
+			 * place. An error path must not be able to die on the error.
+			 *
+			 * The second line names that, so a recurrence arrives labelled rather
+			 * than as a bare exception: an empty applet list means our own .bss
+			 * is not holding what we wrote, which is a different bug from a
+			 * genuinely unknown command. */
+			psh_write(STDERR_FILENO, "psh: ", 5);
+			psh_write(STDERR_FILENO, argv[0], strlen(argv[0]));
+			psh_write(STDERR_FILENO, ": unknown command\n", 18);
+			if (psh_common.pshapplist == NULL) {
+				psh_write(STDERR_FILENO,
+					"psh: applet list is EMPTY -- no applet registered at all, so this is "
+					"not an unknown command but lost .bss (see libc-uninit-main)\n", 129);
+			}
 			break;
 		}
 
