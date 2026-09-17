@@ -6,12 +6,11 @@
  * Copyright 2017, 2018, 2020, 2021 Phoenix Systems
  * Author: Pawel Pisarczyk, Jan Sikorski, Maciej Purski, Lukasz Kosinski, Mateusz Niewiadomski
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 #include <errno.h>
+#include <string.h>
 #include <stdio.h>
 #include <unistd.h>
 
@@ -60,17 +59,31 @@ int psh_bind(int argc, char **argv)
 		return -EINVAL;
 	}
 
-	if (psh_bindLookup(argv[1], &soid) < 0)
+	/* Keep the retry wrapper (ours: the target may not be registered yet when a
+	 * boot script binds early) and take upstream's diagnostic, which is strictly
+	 * better than the bare -ENOENT this used to return. */
+	err = psh_bindLookup(argv[1], &soid);
+	if (err < 0) {
+		fprintf(stderr, "bind: lookup(source) = %s\n", strerror(-err));
 		return -ENOENT;
+	}
 
-	if (psh_bindLookup(argv[2], &doid) < 0)
+	err = psh_bindLookup(argv[2], &doid);
+	if (err < 0) {
+		fprintf(stderr, "bind: lookup(target) = %s\n", strerror(-err));
 		return -ENOENT;
+	}
 
-	if ((err = stat(argv[2], &buf)))
+	err = stat(argv[2], &buf);
+	if (err != 0) {
+		fprintf(stderr, "bind: stat failed with %s\n", strerror(errno));
 		return err;
+	}
 
-	if (!S_ISDIR(buf.st_mode))
+	if (!S_ISDIR(buf.st_mode)) {
+		fprintf(stderr, "bind: target is not a directory\n");
 		return -ENOTDIR;
+	}
 
 	msg.type = mtSetAttr;
 	msg.oid = doid;
@@ -80,7 +93,16 @@ int psh_bind(int argc, char **argv)
 
 	err = msgSend(doid.port, &msg);
 
-	return (err < 0) ? err : msg.o.err;
+	if (err != 0) {
+		fprintf(stderr, "bind: msgSend failed with %s\n", strerror(-err));
+		return err;
+	}
+	else if (msg.o.err != 0) {
+		fprintf(stderr, "bind: server responded with %d\n", msg.o.err);
+		return msg.o.err;
+	}
+
+	return EOK;
 }
 
 
