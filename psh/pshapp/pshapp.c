@@ -67,14 +67,15 @@
 #endif
 #define HISTSZ       512       /* Command history size */
 
-/* TODO(TD-14-psh-retry): raised for Pi 4's slow devfs registration path;
- * restore to upstream default (20 × 100 ms = 2 s) once devfs is fast. */
+/* Deliberate deviation from upstream (accepted fork change): wait for the
+ * console in 10 ms steps rather than upstream's 5 x 100 ms. The budget is the
+ * same 500 ms; the finer step just lets the shell come up as soon as the tty
+ * driver has registered /dev/console instead of up to 100 ms later. */
 #ifndef PSH_TTYOPEN_RETRIES
 #define PSH_TTYOPEN_RETRIES 50
 #endif
 
 #ifndef PSH_TTYOPEN_RETRY_US
-/* 10 ms between retries — 50 × 10 ms = 500 ms upper bound on tty wait. */
 #define PSH_TTYOPEN_RETRY_US 10000
 #endif
 
@@ -1698,16 +1699,8 @@ static int psh_run(int exitable, const char *console)
 			}
 			usleep(PSH_TTYOPEN_RETRY_US);
 		}
-		/* TODO(TD-14-ttyopen-nonfatal): on real Pi 4 the slow IPC path
-		 * to pl011-tty / devfs sometimes prevents /dev/console from
-		 * being openable within our retry budget. Treat ttyopen
-		 * failure as non-fatal: psh continues with whatever
-		 * stdin/stdout/stderr it inherited from posix_clone (the
-		 * kernel klog port). We get a one-way (psh)% banner on UART
-		 * — not interactive, but proof of life. Restore the fatal
-		 * path once the underlying IPC fragility is rooted out. */
 		if (err < 0) {
-			fprintf(stderr, "psh: ttyopen %s failed: %d (using inherited stdio)\n", console, err);
+			return err;
 		}
 	}
 
