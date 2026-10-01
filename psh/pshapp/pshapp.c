@@ -1926,6 +1926,16 @@ int psh_pshapp(int argc, char **argv)
 		(void)setenv("PATH", "/bin:/usr/bin:/sbin:/usr/sbin", 1);
 	}
 
+	/* Programs find their per-user files through HOME (yquake2's write dir,
+	 * `cd` with no argument, Python's `~`, ...). A login sets it from the
+	 * account's passwd entry, but a psh launched straight from plo has no login,
+	 * so do the same here when it is unset. Without it yquake2 fell back to the
+	 * working directory and created /baseq2 on the root filesystem. */
+	if (getenv("HOME") == NULL) {
+		const struct passwd *pw = getpwuid(getuid());
+		(void)setenv("HOME", ((pw != NULL) && (pw->pw_dir != NULL) && (pw->pw_dir[0] != '\0')) ? pw->pw_dir : "/", 1);
+	}
+
 	/* Full-screen TUI apps (nano, vi, ...) via ncurses/termcap need TERM. The
 	 * HDMI fbcon + UART console understand the standard ANSI/VT100 control set
 	 * (incl. SGR colour), so default to "linux" when unset; psh has no inline
