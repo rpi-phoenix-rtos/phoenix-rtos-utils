@@ -95,11 +95,14 @@ static uint32_t *aiToAddr(struct addrinfo *ai)
 
 
 
-static int ntpclient_connect(const char *host, unsigned int timeout)
-
+/* `attempt` picks which of the host's addresses to use: a pool name resolves to several servers,
+ * and the resolver (dnsmasq on the netboot host) keeps returning the same answer for its TTL, so
+ * retrying always the first address let one silent server use up the whole -w window. */
+static int ntpclient_connect(const char *host, unsigned int timeout, unsigned int attempt)
 {
 	int ret = EOK, sockfd;
-	struct addrinfo *res;
+	struct addrinfo *res, *ai;
+	unsigned int n = 0;
 	/* AI_NUMERICSERV: the service is already the literal "123", and without
 	 * this the resolver is entitled to look it up in /etc/services -- which on
 	 * a netboot/NFS root is a network file access that the socket timeout below
@@ -126,13 +129,20 @@ static int ntpclient_connect(const char *host, unsigned int timeout)
 		return doError("getaddrinfo", ret);
 	}
 
+	for (ai = res; ai != NULL; ai = ai->ai_next) {
+		n++;
+	}
+	for (ai = res, n = attempt % n; n > 0U; n--) {
+		ai = ai->ai_next;
+	}
+
 	do {
-		if (inet_ntop(res->ai_family, aiToAddr(res), hostaddr, sizeof(hostaddr)) == NULL) {
+		if (inet_ntop(ai->ai_family, aiToAddr(ai), hostaddr, sizeof(hostaddr)) == NULL) {
 			ret = doError("inet_ntop", -errno);
 			break;
 		}
 
-		sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+		sockfd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
 		if (sockfd < 0) {
 			ret = doError("socket", -errno);
 			break;
@@ -157,7 +167,7 @@ static int ntpclient_connect(const char *host, unsigned int timeout)
 			break;
 		}
 
-		if (connect(sockfd, res->ai_addr, res->ai_addrlen) < 0) {
+		if (connect(sockfd, ai->ai_addr, ai->ai_addrlen) < 0) {
 			ret = doError("connect", -errno);
 			close(sockfd);
 			break;
@@ -260,12 +270,12 @@ static int ntpclient_settime(struct sntp_pkt_s *pkt)
 
 
 /* One full attempt: resolve, exchange, set the clock. Returns EOK or -errno. */
-static int ntpclient_syncOnce(const char *host, unsigned int timeout)
+static int ntpclient_syncOnce(const char *host, unsigned int timeout, unsigned int attempt)
 {
 	struct sntp_pkt_s pkt;
 	int sockfd, err;
 
-	sockfd = ntpclient_connect(host, timeout);
+	sockfd = ntpclient_connect(host, timeout, attempt);
 	if (sockfd < 0) {
 		return sockfd;
 	}
@@ -347,7 +357,7 @@ static int psh_ntpclientMain(int argc, char **argv)
 	int opt;
 	char confhost[128];
 	const char *ntp_host = NULL;
-	unsigned int timeout = NTP_RECV_TIMEOUT_S;
+	unsigned int timeout = NTP_RECV_TIMEOUT_S, attempt = 0;
 	unsigned long window = 0;
 	time_t deadline;
 	char *end;
@@ -395,7 +405,7 @@ static int psh_ntpclientMain(int argc, char **argv)
 	ntpclient_silent = (window > 0UL) ? 1 : 0;
 
 	for (;;) {
-		if (ntpclient_syncOnce(ntp_host, timeout) == EOK) {
+		if (ntpclient_syncOnce(ntp_host, timeout, attempt++) == EOK) {
 			return EXIT_SUCCESS;
 		}
 
