@@ -165,6 +165,9 @@ static struct {
 
 	uint64_t nsamples[3];
 	uint64_t nwaitEvents;
+	int selfPid;
+
+	uint64_t evCount[256], evBytes[256];
 } rep;
 
 
@@ -284,7 +287,7 @@ static size_t evSize(uint8_t id, const uint8_t *p, size_t avail)
 		case prof_ev_sample:
 			return (avail < 12U) ? 0U : urecEnd(p, avail, 12U + (size_t)p[11] * 8U);
 		case prof_ev_wait:
-			return (avail < 44U) ? 0U : urecEnd(p, avail, 44U + (size_t)p[43] * 8U);
+			return (avail < 48U) ? 0U : urecEnd(p, avail, 48U + (size_t)p[47] * 8U);
 		default:
 			return 0;
 	}
@@ -420,6 +423,8 @@ static int loadStream(const char *path, int cpu)
 		}
 		ev.p = data + o + 5U;
 		ev.len = (uint32_t)psz;
+		rep.evCount[ev.id]++;
+		rep.evBytes[ev.id] += 5U + psz;
 		ev.seq = (uint32_t)rep.nevs;
 		if (evPush(&ev) < 0) {
 			return -ENOMEM;
@@ -515,9 +520,16 @@ static int thrPid(int tid)
 }
 
 
+/* The recorder's own threads are left out: they only drain the trace */
 static int thrSelected(int tid)
 {
-	return (rep.pidFilter <= 0) || (thrPid(tid) == rep.pidFilter);
+	int pid = thrPid(tid);
+
+	if ((rep.selfPid > 0) && (pid == rep.selfPid)) {
+		return 0;
+	}
+
+	return (rep.pidFilter <= 0) || (pid == rep.pidFilter);
 }
 
 
@@ -898,24 +910,32 @@ static void process(const ev_t *ev)
 				waitEnd(tid, t, ev->ts, 1);
 			}
 			for (i = 0; i < 4; i++) {
-				args[i] = rd64(p + 11 + 8 * i);
+				args[i] = rd64(p + 15 + 8 * i);
 			}
-			urecParse(p, 44U + (size_t)p[43] * 8U, &u);
+			urecParse(p, 48U + (size_t)p[47] * 8U, &u);
 			t->waiting = 1;
-			t->waitTs = ev->ts;
 			t->waitFlags = p[2];
+			/* deferred (bit 1): written when it ended, blocked = how long; else when it began */
+			t->waitTs = ((p[2] & 2U) != 0U) ? ev->ts - rd32(p + 11) : ev->ts;
 			t->waitSyscall = ((p[2] & 1U) != 0U) ? NO_SYSCALL : t->syscall;
 			t->waitObj = waitObject(t->waitSyscall, rd32(p + 3), args, t);
 			t->waitTimeout = rd32(p + 7);
 			t->waitMid = t->msgMid;
 			t->waitPc = (u.nframes > 0U) ? rd64(u.frames) : u.lr;
-			t->wakeCause = -1;
-			t->waker = -1;
+			if ((p[2] & 2U) == 0U) {
+				/* a deferred wait's thread_wakeup came before it: keep that one */
+				t->wakeCause = -1;
+				t->waker = -1;
+			}
+			if ((p[2] & 4U) != 0U) {
+				/* still waiting when the trace stopped */
+				waitEnd(tid, t, ev->ts, 1);
+			}
 			break;
 
 		case prof_ev_wakeup:
 			t = thrGet(rd16(p));
-			if ((t != NULL) && (t->waiting != 0)) {
+			if (t != NULL) {
 				t->waker = rd16(p + 2);
 				t->wakeCause = (p[4] < CAUSES - 1U) ? p[4] : (int)CAUSES - 1;
 			}
@@ -926,6 +946,11 @@ static void process(const ev_t *ev)
 			t = thrGet(tid);
 			if ((t != NULL) && (t->waiting != 0)) {
 				waitEnd(tid, t, ev->ts, 0);
+			}
+			else if (t != NULL) {
+				/* a wakeup that ended no recorded wait must not stick to the next one */
+				t->wakeCause = -1;
+				t->waker = -1;
 			}
 			break;
 
@@ -1008,6 +1033,46 @@ static uint64_t pcValue(uint64_t key)
 }
 
 
+/* What the trace consists of: what to cut when it is too big */
+static void printMix(void)
+{
+	static const char *const names[256] = {
+		[prof_ev_irqEnter] = "interrupt_enter", [prof_ev_irqExit] = "interrupt_exit", [prof_ev_scheduling] = "thread_scheduling",
+		[prof_ev_preempted] = "thread_preempted", [prof_ev_enqueued] = "thread_enqueued", [prof_ev_waking] = "thread_waking",
+		[prof_ev_threadCreate] = "thread_create", [prof_ev_threadEnd] = "thread_end", [prof_ev_syscallEnter] = "syscall_enter",
+		[prof_ev_syscallExit] = "syscall_exit", [prof_ev_schedEnter] = "sched_enter", [prof_ev_schedExit] = "sched_exit",
+		[prof_ev_lockName] = "lock_name", [prof_ev_lockSetEnter] = "lock_set_enter", [prof_ev_lockSetAcquired] = "lock_set_acquired",
+		[prof_ev_lockSetExit] = "lock_set_exit", [prof_ev_lockClear] = "lock_clear", [prof_ev_threadPriority] = "thread_priority",
+		[prof_ev_processKill] = "process_kill", [prof_ev_processExec] = "process_exec", [prof_ev_sample] = "thread_sample",
+		[prof_ev_wait] = "thread_wait", [prof_ev_wakeup] = "thread_wakeup", [prof_ev_msgSend] = "msg_send",
+		[prof_ev_msgRecv] = "msg_recv", [prof_ev_msgRespond] = "msg_respond"
+	};
+	uint64_t total = 0, best;
+	unsigned int i, k, pick;
+	int shown[256] = { 0 };
+
+	for (i = 0; i < 256U; i++) {
+		total += rep.evBytes[i];
+	}
+	printf("\nEvent mix (%.1f MB; %.2f MB/s)\n", (double)total / 1048576.0,
+		(rep.lastTs != 0U) ? (double)total / 1048576.0 / ((double)rep.lastTs / 1e6) : 0.0);
+	for (k = 0; k < 256U; k++) {
+		for (i = 0, best = 0, pick = 256U; i < 256U; i++) {
+			if ((shown[i] == 0) && (rep.evBytes[i] > best)) {
+				best = rep.evBytes[i];
+				pick = i;
+			}
+		}
+		if (pick == 256U) {
+			break;
+		}
+		shown[pick] = 1;
+		printf("  %-18s %10llu events %8.2f MB %5.1f%%\n", (names[pick] != NULL) ? names[pick] : "?",
+			(unsigned long long)rep.evCount[pick], (double)rep.evBytes[pick] / 1048576.0, 100.0 * (double)rep.evBytes[pick] / (double)total);
+	}
+}
+
+
 typedef struct {
 	int pid;
 	uint64_t user, kernel;
@@ -1051,7 +1116,8 @@ static void printCpu(void)
 				continue;
 			}
 			procs[nprocs].pid = t->pid;
-			snprintf(procs[nprocs].name, sizeof(procs[nprocs].name), "%s", (t->pid == 0) ? "[kernel threads + idle]" : t->name);
+			snprintf(procs[nprocs].name, sizeof(procs[nprocs].name), "%.36s%s", (t->pid == 0) ? "[kernel threads + idle]" : t->name,
+				((rep.selfPid > 0) && (t->pid == rep.selfPid)) ? " (recorder)" : "");
 			nprocs++;
 		}
 		procs[j].user += t->samples[0];
@@ -1249,6 +1315,9 @@ static void loadInfo(const char *dir)
 		else if ((rep.pidFilter == 0) && (sscanf(line, "pid %d", &pid) == 1)) {
 			rep.pidFilter = pid;
 		}
+		else if (sscanf(line, "self %d", &pid) == 1) {
+			rep.selfPid = pid;
+		}
 	}
 
 	fclose(f);
@@ -1325,6 +1394,7 @@ int prof_report(int argc, char **argv)
 		printf("prof: threads of pid %d only (CPU table: all)\n", rep.pidFilter);
 	}
 
+	printMix();
 	printCpu();
 	printPcs();
 	printLongest();
