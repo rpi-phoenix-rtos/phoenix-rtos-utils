@@ -13,4 +13,4 @@
 # project's b_build_project builds it (via `make ... nfs-smoke nfs-smoke-install`)
 # in the project stage for the netboot variant only. The `nfs-smoke` target still
 # exists here (nfs-smoke/Makefile via the ALL_MAKES glob) for that post-ports build.
-DEFAULT_COMPONENTS := psh
+DEFAULT_COMPONENTS := psh prof
