@@ -23,15 +23,18 @@
 
 static void usage(const char *progname)
 {
-	printf("Usage: %s record [-t secs] [-o dir] [-p pid] [-f period_us] [-d depth] [-s bytes] [-w bytes] [-r] [-L dirs]\n"
+	printf("Usage: %s record [-t secs] [-o dir] [-p pid] [-f period_us] [-b us] [-d depth] [-s bytes] [-w bytes] [-M MB] [-r] [-L dirs]\n"
 		   "       %s report [-p pid] [-n count] [dir]\n"
-		   "record: trace every thread of every process for secs (default 10) into dir (default %s)\n"
+		   "record: trace every thread of every process for secs (default 10), in memory, then write it\n"
+		   "  into dir (default %s; written only after the trace stops, so it may be on NFS)\n"
 		   "  -p pid     the process of interest (stored for report)\n"
-		   "  -f us      sampling period per CPU (default 1000; the timer tick is the resolution)\n"
+		   "  -f us      sampling period per CPU (default 2000; the 1 ms timer tick is the resolution)\n"
+		   "  -b us      record only waits of at least us, when they end (default 1000; 0: every wait)\n"
 		   "  -d depth   frame-pointer chain length (default 16)\n"
 		   "  -s bytes   user stack copied with each sample (default 512, 0..4096)\n"
-		   "  -w bytes   user stack copied with each wait (default 512, 0..4096)\n"
-		   "  -r         rolling: keep only what fits the kernel buffers, read it at the end\n"
+		   "  -w bytes   user stack copied with each wait (default 512; at most 1024 with -b, else 4096)\n"
+		   "  -M MB      memory for the recording (default 256): it stops early when full\n"
+		   "  -r         rolling: keep only what fits the kernel buffers (4 MB per CPU), read it at the end\n"
 		   "  -L dirs    where to look up the files the processes map, ':'-separated\n"
 		   "report: CPU per process, top PCs per thread, waits by reason, longest waits and\n"
 		   "  message edges (client -> server thread); addresses are symbolized on the host by\n"

@@ -32,10 +32,24 @@
  * every CPU's events wait for that lock: keep it small, and touched beforehand so that the copy
  * takes no page fault.
  */
-#define RECORD_BUFSZ    (64U << 10)
-#define RECORD_DRAIN_MS 100U         /* kernel buffers are 4 MB per CPU: drained well before they fill */
-#define RECORD_THREADS  1024
-#define RECORD_LIBDIRS  "/bin:/sbin:/usr/bin:/usr/sbin:/lib:/usr/lib:/usr/local/bin:/usr/local/lib:/usr/libexec"
+#define RECORD_BUFSZ       (64U << 10)
+#define RECORD_DRAIN_MS    100U /* kernel buffers are 4 MB per CPU: drained well before they fill */
+#define RECORD_PASS_READS  32U  /* reads of one channel per pass: a pass is bounded, the deadline holds */
+#define RECORD_MEM_MB      256U /* default cap of the in-memory recording */
+#define RECORD_THREADS     1024
+#define RECORD_LIBDIRS     "/bin:/sbin:/usr/bin:/usr/sbin:/lib:/usr/lib:/usr/local/bin:/usr/local/lib:/usr/libexec"
+
+
+/*
+ * The recording is kept in memory until the trace is stopped and only then written out. Writing
+ * while tracing makes the recorder trace itself: every write to an NFS root is messages to the
+ * file server, the network stack and the Ethernet driver, whose events outgrow what was written
+ * (build 38: 942 MB in a minute for a 5 s recording that never ended).
+ */
+typedef struct {
+	uint8_t *data;
+	size_t len, cap;
+} record_chan_t;
 
 
 static volatile sig_atomic_t record_stop;
@@ -58,27 +72,89 @@ static uint64_t record_nowMs(void)
 }
 
 
-/* Appends what the kernel holds of every channel to its file */
-static int record_drain(int nchans, char *buf, FILE **files, size_t *total)
+static int record_append(record_chan_t *c, const char *buf, size_t n)
 {
+	uint8_t *data;
+	size_t cap;
+
+	if (c->len + n > c->cap) {
+		cap = (c->cap == 0U) ? (1U << 20) : c->cap;
+		while (cap < c->len + n) {
+			cap *= 2U;
+		}
+		data = realloc(c->data, cap);
+		if (data == NULL) {
+			return -ENOMEM;
+		}
+		c->data = data;
+		c->cap = cap;
+	}
+	memcpy(c->data + c->len, buf, n);
+	c->len += n;
+
+	return 0;
+}
+
+
+/*
+ * Moves what the kernel holds into memory. bounded: at most RECORD_PASS_READS reads per channel,
+ * so that a pass ends even if events come in faster than they are read. Returns -ENOSPC once
+ * *total reaches limit.
+ */
+static int record_drain(int nchans, char *buf, record_chan_t *chans, size_t *total, size_t limit, int bounded)
+{
+	unsigned int k;
 	int i, n;
 
 	for (i = 0; i < nchans; i++) {
-		do {
+		for (k = 0; (bounded == 0) || (k < RECORD_PASS_READS); k++) {
+			if (*total + RECORD_BUFSZ > limit) {
+				return -ENOSPC;
+			}
 			n = perf_read(perf_mode_trace, buf, RECORD_BUFSZ, i);
 			if (n < 0) {
 				fprintf(stderr, "prof: perf_read(%d): %s\n", i, strerror(-n));
 				return n;
 			}
-			if ((n > 0) && (fwrite(buf, 1, (size_t)n, files[i]) != (size_t)n)) {
-				fprintf(stderr, "prof: write failed: %s\n", strerror(errno));
-				return -EIO;
+			if ((n > 0) && (record_append(&chans[i], buf, (size_t)n) < 0)) {
+				return -ENOSPC;
 			}
 			*total += (size_t)n;
-		} while (n == (int)RECORD_BUFSZ);
+			if (n < (int)RECORD_BUFSZ) {
+				break;
+			}
+		}
 	}
 
 	return 0;
+}
+
+
+static int record_write(const char *dir, int nchans, const record_chan_t *chans)
+{
+	char path[PATH_MAX];
+	FILE *f;
+	int i, err = 0;
+
+	for (i = 0; i < nchans; i++) {
+		snprintf(path, sizeof(path), "%s/%s%d", dir,
+			((i % (int)trace_channel_count) == (int)trace_channel_meta) ? "channel_meta" : "channel_event",
+			i / (int)trace_channel_count);
+		f = fopen(path, "wb");
+		if (f == NULL) {
+			fprintf(stderr, "prof: %s: %s\n", path, strerror(errno));
+			return -1;
+		}
+		if ((chans[i].len != 0U) && (fwrite(chans[i].data, 1, chans[i].len, f) != chans[i].len)) {
+			fprintf(stderr, "prof: %s: write failed: %s\n", path, strerror(errno));
+			err = -1;
+		}
+		if (fclose(f) != 0) {
+			err = -1;
+		}
+	}
+
+	return err;
 }
 
 
@@ -218,46 +294,27 @@ static void record_files(FILE *f, const char *dirs, const record_oids_t *oids)
 
 static void record_info(FILE *f, int pid, const perf_trace_cfg_t *cfg, unsigned int secs, int ncpus)
 {
-	fprintf(f, "version 1\npid %d\ncpus %d\nseconds %u\nperiod_us %u\ndepth %u\nsample_stack %u\nwait_stack %u\n",
-		pid, ncpus, secs, cfg->samplePeriodUs, cfg->depth, cfg->sampleStack, cfg->waitStack);
-}
-
-
-static int record_open(const char *dir, int nchans, FILE **files)
-{
-	char path[PATH_MAX];
-	int i;
-
-	for (i = 0; i < nchans; i++) {
-		snprintf(path, sizeof(path), "%s/%s%d", dir,
-			((i % (int)trace_channel_count) == (int)trace_channel_meta) ? "channel_meta" : "channel_event",
-			i / (int)trace_channel_count);
-		files[i] = fopen(path, "wb");
-		if (files[i] == NULL) {
-			fprintf(stderr, "prof: %s: %s\n", path, strerror(errno));
-			return -1;
-		}
-	}
-
-	return 0;
+	fprintf(f, "version 2\npid %d\ncpus %d\nseconds %u\nperiod_us %u\ndepth %u\nsample_stack %u\nwait_stack %u\nwait_min_us %u\n",
+		pid, ncpus, secs, cfg->samplePeriodUs, cfg->depth, cfg->sampleStack, cfg->waitStack, cfg->waitMinUs);
 }
 
 
 int prof_record(int argc, char **argv)
 {
-	perf_trace_cfg_t cfg = { .samplePeriodUs = 1000, .depth = 16, .sampleStack = 512, .waitStack = 512 };
+	perf_trace_cfg_t cfg = { .samplePeriodUs = 2000, .depth = 16, .sampleStack = 512, .waitStack = 512, .waitMinUs = 1000 };
 	const char *dir = PROF_DEFAULT_DIR, *libdirs = RECORD_LIBDIRS;
 	record_oids_t oids = { 0 };
-	unsigned int secs = 10, flags = PERF_TRACE_FLAG_SAMPLE;
-	int opt, pid = 0, nchans, i, err = 0;
-	FILE **files = NULL, *finfo;
+	unsigned int secs = 10, flags = PERF_TRACE_FLAG_SAMPLE, memMb = RECORD_MEM_MB;
+	int opt, pid = 0, nchans, i, err = 0, full = 0;
+	record_chan_t *chans = NULL;
 	char path[PATH_MAX], *buf;
-	uint64_t start, deadline;
-	size_t total = 0;
+	uint64_t start, deadline, now, stopped;
+	size_t total = 0, limit;
 	struct stat st;
+	FILE *finfo;
 
 	optind = 1;
-	while ((opt = getopt(argc, argv, "t:o:p:f:d:s:w:rL:")) != -1) {
+	while ((opt = getopt(argc, argv, "t:o:p:f:d:s:w:b:M:rL:")) != -1) {
 		switch (opt) {
 			case 't':
 				secs = (unsigned int)strtoul(optarg, NULL, 0);
@@ -280,6 +337,12 @@ int prof_record(int argc, char **argv)
 			case 'w':
 				cfg.waitStack = (unsigned int)strtoul(optarg, NULL, 0);
 				break;
+			case 'b':
+				cfg.waitMinUs = (unsigned int)strtoul(optarg, NULL, 0);
+				break;
+			case 'M':
+				memMb = (unsigned int)strtoul(optarg, NULL, 0);
+				break;
 			case 'r':
 				flags |= PERF_TRACE_FLAG_ROLLING;
 				break;
@@ -292,10 +355,13 @@ int prof_record(int argc, char **argv)
 		}
 	}
 
-	if ((secs == 0U) || (cfg.depth > PERF_TRACE_DEPTH_MAX) || (cfg.sampleStack > PERF_TRACE_USTACK_MAX) || (cfg.waitStack > PERF_TRACE_USTACK_MAX)) {
-		fprintf(stderr, "prof: bad argument (depth <= %u, stack bytes <= %u)\n", PERF_TRACE_DEPTH_MAX, PERF_TRACE_USTACK_MAX);
+	if ((secs == 0U) || (memMb == 0U) || (cfg.depth > PERF_TRACE_DEPTH_MAX) || (cfg.sampleStack > PERF_TRACE_USTACK_MAX) ||
+		(cfg.waitStack > ((cfg.waitMinUs != 0U) ? PERF_TRACE_WAITSTACK_DEFERRED_MAX : PERF_TRACE_USTACK_MAX))) {
+		fprintf(stderr, "prof: bad argument (depth <= %u, -s <= %u, -w <= %u, or <= %u with -b > 0)\n",
+			PERF_TRACE_DEPTH_MAX, PERF_TRACE_USTACK_MAX, PERF_TRACE_USTACK_MAX, PERF_TRACE_WAITSTACK_DEFERRED_MAX);
 		return 1;
 	}
+	limit = (size_t)memMb << 20;
 
 	if ((stat(dir, &st) < 0) && (mkdir(dir, 0777) < 0)) {
 		fprintf(stderr, "prof: mkdir %s: %s\n", dir, strerror(errno));
@@ -312,6 +378,7 @@ int prof_record(int argc, char **argv)
 	signal(SIGINT, record_onSignal);
 	signal(SIGTERM, record_onSignal);
 
+	/* everything written out before the trace starts or after it stops (see record_chan_t) */
 	snprintf(path, sizeof(path), "%s/%s", dir, PROF_INFO_FILE);
 	finfo = fopen(path, "w");
 	if (finfo == NULL) {
@@ -320,6 +387,7 @@ int prof_record(int argc, char **argv)
 		return 1;
 	}
 	record_processes(finfo, "thread", &oids);
+	fflush(finfo);
 
 	nchans = perf_start(perf_mode_trace, flags, &cfg, sizeof(cfg));
 	if (nchans < 0) {
@@ -329,52 +397,74 @@ int prof_record(int argc, char **argv)
 		free(buf);
 		return 1;
 	}
-	record_info(finfo, pid, &cfg, secs, nchans / (int)trace_channel_count);
 
-	files = calloc((size_t)nchans, sizeof(*files));
-	if ((files == NULL) || (record_open(dir, nchans, files) < 0)) {
-		err = -1;
+	chans = calloc((size_t)nchans, sizeof(*chans));
+	if (chans == NULL) {
+		err = -ENOMEM;
 	}
 
-	fprintf(stderr, "prof: recording %u s on %d CPUs into %s (Ctrl-C ends early)\n", secs, nchans / (int)trace_channel_count, dir);
+	fprintf(stderr, "prof: recording %u s on %d CPUs, in memory (at most %u MB), then into %s\n", secs,
+		nchans / (int)trace_channel_count, memMb, dir);
 
+	/* The deadline is checked between bounded passes: the trace stops on time whatever comes in */
 	start = record_nowMs();
 	deadline = start + (uint64_t)secs * 1000U;
-	while ((err == 0) && (record_stop == 0) && (record_nowMs() < deadline)) {
+	for (now = start; (err == 0) && (record_stop == 0) && (now < deadline); now = record_nowMs()) {
 		if ((flags & PERF_TRACE_FLAG_ROLLING) == 0U) {
-			err = record_drain(nchans, buf, files, &total);
+			err = record_drain(nchans, buf, chans, &total, limit, 1);
 		}
-		usleep(RECORD_DRAIN_MS * 1000U);
+		now = record_nowMs();
+		if ((err == 0) && (now < deadline)) {
+			usleep((unsigned int)(((deadline - now) < RECORD_DRAIN_MS) ? (deadline - now) : RECORD_DRAIN_MS) * 1000U);
+		}
+	}
+	if (err == -ENOSPC) {
+		full = 1;
+		err = 0;
 	}
 
-	if (perf_stop(perf_mode_trace) >= 0) {
-		if (err == 0) {
-			err = record_drain(nchans, buf, files, &total);
+	(void)perf_stop(perf_mode_trace);
+	stopped = record_nowMs();
+
+	/* the kernel's buffers no longer grow: this ends */
+	if ((err == 0) && (chans != NULL)) {
+		err = record_drain(nchans, buf, chans, &total, limit, 0);
+		if (err == -ENOSPC) {
+			full = 1;
+			err = 0;
 		}
 	}
 	(void)perf_finish(perf_mode_trace);
 
-	/* After the trace: the processes started during it, and the paths of what they all mapped */
+	if (full != 0) {
+		fprintf(stderr, "prof: the recording reached %u MB and was cut short (-M raises it; -b/-s/-w/-f lower the volume)\n", memMb);
+	}
+
+	fprintf(finfo, "self %d\n", getpid());
+	record_info(finfo, pid, &cfg, secs, nchans / (int)trace_channel_count);
+	fprintf(finfo, "recorded_ms %llu\n", (unsigned long long)(stopped - start));
+
+	if ((chans != NULL) && (record_write(dir, nchans, chans) < 0)) {
+		err = -EIO;
+	}
+
+	/* after the trace: the processes started during it, and the paths of what they all mapped */
 	record_processes(finfo, "thread-end", &oids);
 	record_files(finfo, libdirs, &oids);
 	fclose(finfo);
 	free(oids.oids);
 
-	if (files != NULL) {
-		for (i = 0; i < nchans; i++) {
-			if (files[i] != NULL) {
-				fclose(files[i]);
-			}
-		}
-		free(files);
+	fprintf(stderr, "prof: %.1f s, %zu bytes", (double)(stopped - start) / 1000.0, total);
+	for (i = 0; (chans != NULL) && (i < nchans); i++) {
+		fprintf(stderr, "%s%s%d %zu", (i == 0) ? " (" : ", ", ((i % 2) == 0) ? "meta" : "event", i / 2, chans[i].len);
+		free(chans[i].data);
 	}
-	free(buf);
-
-	fprintf(stderr, "prof: %.1f s, %zu bytes in %s%s\n", (double)(record_nowMs() - start) / 1000.0, total, dir,
-		(err == 0) ? "" : " (incomplete: error above)");
+	fprintf(stderr, "%s in %s%s\n", (chans != NULL) ? ")" : "", dir, (err == 0) ? "" : " (incomplete: error above)");
 	if (err == 0) {
 		fprintf(stderr, "prof: `prof report %s` here, or scripts/prof-report.py on the host for symbols\n", dir);
 	}
+	free(chans);
+	free(buf);
 
 	return (err == 0) ? 0 : 1;
 }
