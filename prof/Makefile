@@ -8,7 +8,7 @@
 
 NAME := prof
 LOCAL_PATH = $(call my-dir)
-LOCAL_SRCS := prof.c record.c report.c
+LOCAL_SRCS := prof.c record.c report.c event.c
 LOCAL_INSTALL_PATH := /bin
 
 include $(binary.mk)

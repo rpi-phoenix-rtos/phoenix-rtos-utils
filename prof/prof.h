@@ -15,6 +15,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 
 #define PROF_DEFAULT_DIR "/tmp/prof"
@@ -48,7 +49,69 @@ enum {
 	prof_ev_msgSend = 0x43,
 	prof_ev_msgRecv = 0x44,
 	prof_ev_msgRespond = 0x45,
+	prof_ev_traceStats = 0x46,
 };
+
+
+/* Payload offsets of thread_sample and thread_wait (the user part follows the kernel frames) */
+#define PROF_SAMPLE_NK      11U
+#define PROF_SAMPLE_KFRAMES 12U
+#define PROF_WAIT_FLAGS     2U
+#define PROF_WAIT_QUEUE     3U
+#define PROF_WAIT_TIMEOUT   7U
+#define PROF_WAIT_BLOCKED   11U
+#define PROF_WAIT_SYSCALL   15U
+#define PROF_WAIT_ARGS      17U
+#define PROF_WAIT_NK        49U
+#define PROF_WAIT_KFRAMES   50U
+
+#define PROF_MAX_CPUS 16
+
+
+/* Bytes and counts per event type and CPU, and what trace_stats said was lost */
+typedef struct {
+	uint64_t count[256][PROF_MAX_CPUS];
+	uint64_t bytes[256][PROF_MAX_CPUS];
+	uint64_t skipped;
+	int stats;
+	uint64_t discarded, waitsDropped;
+} prof_mix_t;
+
+
+static inline uint16_t prof_rd16(const uint8_t *p)
+{
+	return (uint16_t)(p[0] | (p[1] << 8));
+}
+
+
+static inline uint32_t prof_rd32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+
+static inline uint64_t prof_rd64(const uint8_t *p)
+{
+	return (uint64_t)prof_rd32(p) | ((uint64_t)prof_rd32(p + 4) << 32);
+}
+
+
+const char *prof_evName(uint8_t id);
+
+
+/* Payload size of an event, 0 if unknown or truncated */
+size_t prof_evSize(uint8_t id, const uint8_t *p, size_t avail);
+
+
+/* Whether an event boundary is at offset o (a run of events parses from it) */
+int prof_syncAt(const uint8_t *data, size_t sz, size_t o);
+
+
+/* Adds a channel's (or part of a channel's) events to mix */
+void prof_mixAdd(prof_mix_t *mix, const uint8_t *data, size_t sz, int cpu);
+
+
+void prof_mixPrint(FILE *f, const prof_mix_t *mix, int ncpus, double secs);
 
 
 /* Written by `prof record` next to the trace channels */

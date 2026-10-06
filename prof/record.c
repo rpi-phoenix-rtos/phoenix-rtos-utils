@@ -19,6 +19,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/perf.h>
 #include <sys/stat.h>
@@ -36,6 +37,9 @@
 #define RECORD_DRAIN_MS    100U /* kernel buffers are 4 MB per CPU: drained well before they fill */
 #define RECORD_PASS_READS  32U  /* reads of one channel per pass: a pass is bounded, the deadline holds */
 #define RECORD_MEM_MB      256U /* default cap of the in-memory recording */
+#define RECORD_WRITE_CHUNK (1U << 20) /* one write() of a channel file */
+#define RECORD_CAP_EVENT   (4U << 20) /* first allocation of a channel: the kernel's buffer size */
+#define RECORD_CAP_META    (256U << 10)
 #define RECORD_THREADS     1024
 #define RECORD_LIBDIRS     "/bin:/sbin:/usr/bin:/usr/sbin:/lib:/usr/lib:/usr/local/bin:/usr/local/lib:/usr/libexec"
 
@@ -72,13 +76,14 @@ static uint64_t record_nowMs(void)
 }
 
 
-static int record_append(record_chan_t *c, const char *buf, size_t n)
+static int record_append(record_chan_t *c, int meta, const char *buf, size_t n)
 {
 	uint8_t *data;
 	size_t cap;
 
 	if (c->len + n > c->cap) {
-		cap = (c->cap == 0U) ? (1U << 20) : c->cap;
+		/* sized for a whole kernel buffer up front: fewer copies of a growing recording */
+		cap = (c->cap == 0U) ? ((meta != 0) ? RECORD_CAP_META : RECORD_CAP_EVENT) : c->cap;
 		while (cap < c->len + n) {
 			cap *= 2U;
 		}
@@ -116,7 +121,7 @@ static int record_drain(int nchans, char *buf, record_chan_t *chans, size_t *tot
 				fprintf(stderr, "prof: perf_read(%d): %s\n", i, strerror(-n));
 				return n;
 			}
-			if ((n > 0) && (record_append(&chans[i], buf, (size_t)n) < 0)) {
+			if ((n > 0) && (record_append(&chans[i], ((i % (int)trace_channel_count) == (int)trace_channel_meta) ? 1 : 0, buf, (size_t)n) < 0)) {
 				return -ENOSPC;
 			}
 			*total += (size_t)n;
@@ -130,26 +135,54 @@ static int record_drain(int nchans, char *buf, record_chan_t *chans, size_t *tot
 }
 
 
+/* One channel file, in RECORD_WRITE_CHUNK writes: a slow or failing file server sees small requests */
+static int record_writeFile(const char *path, const uint8_t *data, size_t len)
+{
+	size_t done = 0, n;
+	ssize_t ret;
+	int fd;
+
+	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+	if (fd < 0) {
+		fprintf(stderr, "prof: %s: %s\n", path, strerror(errno));
+		return -1;
+	}
+
+	while (done < len) {
+		n = ((len - done) < RECORD_WRITE_CHUNK) ? (len - done) : RECORD_WRITE_CHUNK;
+		ret = write(fd, data + done, n);
+		if (ret <= 0) {
+			if ((ret < 0) && (errno == EINTR)) {
+				continue;
+			}
+			fprintf(stderr, "prof: %s: write failed after %zu of %zu bytes: %s\n", path, done, len,
+				(ret < 0) ? strerror(errno) : "no progress");
+			close(fd);
+			return -1;
+		}
+		done += (size_t)ret;
+	}
+
+	if (close(fd) < 0) {
+		fprintf(stderr, "prof: %s: close: %s\n", path, strerror(errno));
+		return -1;
+	}
+
+	return 0;
+}
+
+
+/* Every channel file; a failed one does not stop the others */
 static int record_write(const char *dir, int nchans, const record_chan_t *chans)
 {
 	char path[PATH_MAX];
-	FILE *f;
 	int i, err = 0;
 
 	for (i = 0; i < nchans; i++) {
 		snprintf(path, sizeof(path), "%s/%s%d", dir,
 			((i % (int)trace_channel_count) == (int)trace_channel_meta) ? "channel_meta" : "channel_event",
 			i / (int)trace_channel_count);
-		f = fopen(path, "wb");
-		if (f == NULL) {
-			fprintf(stderr, "prof: %s: %s\n", path, strerror(errno));
-			return -1;
-		}
-		if ((chans[i].len != 0U) && (fwrite(chans[i].data, 1, chans[i].len, f) != chans[i].len)) {
-			fprintf(stderr, "prof: %s: write failed: %s\n", path, strerror(errno));
-			err = -1;
-		}
-		if (fclose(f) != 0) {
+		if (record_writeFile(path, chans[i].data, chans[i].len) < 0) {
 			err = -1;
 		}
 	}
@@ -292,16 +325,53 @@ static void record_files(FILE *f, const char *dirs, const record_oids_t *oids)
 }
 
 
+/* -e: classes recorded on top of the profile's */
+static int record_classes(const char *list, unsigned int *classes)
+{
+	static const struct {
+		const char *name;
+		unsigned int bits;
+	} names[] = {
+		{ "sched", PERF_TRACE_EV_SCHED },
+		{ "syscall", PERF_TRACE_EV_SYSCALL },
+		{ "lock", PERF_TRACE_EV_LOCK },
+		{ "irq", PERF_TRACE_EV_IRQ },
+		{ "all", PERF_TRACE_EV_SCHED | PERF_TRACE_EV_SYSCALL | PERF_TRACE_EV_LOCK | PERF_TRACE_EV_IRQ },
+	};
+	const char *p = list, *end;
+	size_t i, len;
+
+	while (*p != '\0') {
+		end = strchr(p, ',');
+		len = (end != NULL) ? (size_t)(end - p) : strlen(p);
+		for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+			if ((strlen(names[i].name) == len) && (strncmp(names[i].name, p, len) == 0)) {
+				*classes |= names[i].bits;
+				break;
+			}
+		}
+		if (i == sizeof(names) / sizeof(names[0])) {
+			return -1;
+		}
+		p += len + ((end != NULL) ? 1U : 0U);
+	}
+
+	return 0;
+}
+
+
 static void record_info(FILE *f, int pid, const perf_trace_cfg_t *cfg, unsigned int secs, int ncpus)
 {
-	fprintf(f, "version 2\npid %d\ncpus %d\nseconds %u\nperiod_us %u\ndepth %u\nsample_stack %u\nwait_stack %u\nwait_min_us %u\n",
-		pid, ncpus, secs, cfg->samplePeriodUs, cfg->depth, cfg->sampleStack, cfg->waitStack, cfg->waitMinUs);
+	fprintf(f, "version 3\npid %d\ncpus %d\nseconds %u\nperiod_us %u\ndepth %u\nsample_stack %u\nwait_stack %u\nwait_min_us %u\nevents 0x%x\n",
+		pid, ncpus, secs, cfg->samplePeriodUs, cfg->depth, cfg->sampleStack, cfg->waitStack, cfg->waitMinUs, cfg->events);
 }
 
 
 int prof_record(int argc, char **argv)
 {
-	perf_trace_cfg_t cfg = { .samplePeriodUs = 2000, .depth = 16, .sampleStack = 512, .waitStack = 512, .waitMinUs = 1000 };
+	perf_trace_cfg_t cfg = { .samplePeriodUs = 2000, .depth = 16, .sampleStack = 512, .waitStack = 512, .waitMinUs = 1000, .events = 0 };
+	unsigned int extra = 0;
+	prof_mix_t *mix;
 	const char *dir = PROF_DEFAULT_DIR, *libdirs = RECORD_LIBDIRS;
 	record_oids_t oids = { 0 };
 	unsigned int secs = 10, flags = PERF_TRACE_FLAG_SAMPLE, memMb = RECORD_MEM_MB;
@@ -314,7 +384,7 @@ int prof_record(int argc, char **argv)
 	FILE *finfo;
 
 	optind = 1;
-	while ((opt = getopt(argc, argv, "t:o:p:f:d:s:w:b:M:rL:")) != -1) {
+	while ((opt = getopt(argc, argv, "t:o:p:f:d:s:w:b:M:e:rL:")) != -1) {
 		switch (opt) {
 			case 't':
 				secs = (unsigned int)strtoul(optarg, NULL, 0);
@@ -340,6 +410,12 @@ int prof_record(int argc, char **argv)
 			case 'b':
 				cfg.waitMinUs = (unsigned int)strtoul(optarg, NULL, 0);
 				break;
+			case 'e':
+				if (record_classes(optarg, &extra) < 0) {
+					fprintf(stderr, "prof: -e takes a list of sched,syscall,lock,irq,all\n");
+					return 1;
+				}
+				break;
 			case 'M':
 				memMb = (unsigned int)strtoul(optarg, NULL, 0);
 				break;
@@ -362,6 +438,13 @@ int prof_record(int argc, char **argv)
 		return 1;
 	}
 	limit = (size_t)memMb << 20;
+
+	/*
+	 * A profile: samples, the waits that last and who ended them, messages, thread names. The
+	 * events of every switch, syscall, lock and interrupt come at the rate of those operations: -e.
+	 * Every wait recorded when it begins (-b 0) is ended by thread_waking, a scheduling event.
+	 */
+	cfg.events = PERF_TRACE_EV_PROFILE | extra | ((cfg.waitMinUs == 0U) ? PERF_TRACE_EV_SCHED : 0U);
 
 	if ((stat(dir, &st) < 0) && (mkdir(dir, 0777) < 0)) {
 		fprintf(stderr, "prof: mkdir %s: %s\n", dir, strerror(errno));
@@ -439,6 +522,17 @@ int prof_record(int argc, char **argv)
 	if (full != 0) {
 		fprintf(stderr, "prof: the recording reached %u MB and was cut short (-M raises it; -b/-s/-w/-f lower the volume)\n", memMb);
 	}
+
+	/* what was recorded, from memory: printed even if writing it out fails */
+	mix = calloc(1, sizeof(*mix));
+	if ((mix != NULL) && (chans != NULL)) {
+		for (i = 0; i < nchans; i++) {
+			prof_mixAdd(mix, chans[i].data, chans[i].len, i / (int)trace_channel_count);
+		}
+		prof_mixPrint(stdout, mix, nchans / (int)trace_channel_count, (double)(stopped - start) / 1000.0);
+		fflush(stdout);
+	}
+	free(mix);
 
 	fprintf(finfo, "self %d\n", getpid());
 	record_info(finfo, pid, &cfg, secs, nchans / (int)trace_channel_count);
