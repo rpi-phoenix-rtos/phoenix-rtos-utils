@@ -23,7 +23,7 @@
 
 static void usage(const char *progname)
 {
-	printf("Usage: %s record [-t secs] [-o dir] [-p pid] [-f period_us] [-b us] [-d depth] [-s bytes] [-w bytes] [-M MB] [-r] [-L dirs]\n"
+	printf("Usage: %s record [-t secs] [-o dir] [-p pid] [-f period_us] [-b us] [-d depth] [-s bytes] [-w bytes] [-e classes] [-M MB] [-r] [-L dirs]\n"
 		   "       %s report [-p pid] [-n count] [dir]\n"
 		   "record: trace every thread of every process for secs (default 10), in memory, then write it\n"
 		   "  into dir (default %s; written only after the trace stops, so it may be on NFS)\n"
@@ -33,6 +33,8 @@ static void usage(const char *progname)
 		   "  -d depth   frame-pointer chain length (default 16)\n"
 		   "  -s bytes   user stack copied with each sample (default 512, 0..4096)\n"
 		   "  -w bytes   user stack copied with each wait (default 512; at most 1024 with -b, else 4096)\n"
+		   "  -e list    also record sched,syscall,lock,irq (or all) events: upstream's trace events,\n"
+		   "             at the rate of every switch, syscall, lock and interrupt (default: none)\n"
 		   "  -M MB      memory for the recording (default 256): it stops early when full\n"
 		   "  -r         rolling: keep only what fits the kernel buffers (4 MB per CPU), read it at the end\n"
 		   "  -L dirs    where to look up the files the processes map, ':'-separated\n"

@@ -166,27 +166,10 @@ static struct {
 	uint64_t nsamples[3];
 	uint64_t nwaitEvents;
 	int selfPid;
+	int scMsgSend; /* syscall number of msgSend */
 
-	uint64_t evCount[256], evBytes[256];
+	prof_mix_t mix;
 } rep;
-
-
-static uint16_t rd16(const uint8_t *p)
-{
-	return (uint16_t)(p[0] | (p[1] << 8));
-}
-
-
-static uint32_t rd32(const uint8_t *p)
-{
-	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-
-static uint64_t rd64(const uint8_t *p)
-{
-	return (uint64_t)rd32(p) | ((uint64_t)rd32(p + 4) << 32);
-}
 
 
 static uint64_t hash64(uint64_t x)
@@ -198,101 +181,17 @@ static uint64_t hash64(uint64_t x)
 }
 
 
-/* Size of the user part starting at offset o, 0 if truncated */
-static size_t urecEnd(const uint8_t *p, size_t avail, size_t o)
-{
-	size_t nf, ns;
-
-	if (avail < o + 33U) {
-		return 0;
-	}
-	nf = p[o + 32U];
-	o += 33U + nf * 8U;
-	if (avail < o + 2U) {
-		return 0;
-	}
-	ns = rd16(p + o);
-	o += 2U + ns * 8U;
-
-	return (avail < o) ? 0U : o;
-}
-
-
 static void urecParse(const uint8_t *p, size_t o, urec_t *u)
 {
-	u->pc = rd64(p + o);
-	u->lr = rd64(p + o + 8U);
-	u->sp = rd64(p + o + 16U);
-	u->fp = rd64(p + o + 24U);
+	u->pc = prof_rd64(p + o);
+	u->lr = prof_rd64(p + o + 8U);
+	u->sp = prof_rd64(p + o + 16U);
+	u->fp = prof_rd64(p + o + 24U);
 	u->nframes = p[o + 32U];
 	u->frames = p + o + 33U;
 	o += 33U + (size_t)u->nframes * 8U;
-	u->nstack = rd16(p + o);
+	u->nstack = prof_rd16(p + o);
 	u->stack = p + o + 2U;
-}
-
-
-/* Payload size of an event, 0 if unknown or truncated */
-static size_t evSize(uint8_t id, const uint8_t *p, size_t avail)
-{
-	size_t sz;
-
-	switch (id) {
-		case prof_ev_irqEnter:
-		case prof_ev_irqExit:
-		case prof_ev_schedEnter:
-		case prof_ev_schedExit:
-			sz = 1;
-			break;
-		case prof_ev_scheduling:
-		case prof_ev_preempted:
-		case prof_ev_enqueued:
-		case prof_ev_waking:
-		case prof_ev_processKill:
-			sz = 2;
-			break;
-		case prof_ev_syscallEnter:
-		case prof_ev_syscallExit:
-		case prof_ev_threadPriority:
-			sz = 3;
-			break;
-		case prof_ev_threadEnd:
-			sz = 4;
-			break;
-		case prof_ev_wakeup:
-			sz = 5;
-			break;
-		case prof_ev_lockSetEnter:
-		case prof_ev_lockSetAcquired:
-		case prof_ev_lockSetExit:
-		case prof_ev_lockClear:
-			sz = 6;
-			break;
-		case prof_ev_msgRespond:
-			sz = 10;
-			break;
-		case prof_ev_msgRecv:
-			sz = 12;
-			break;
-		case prof_ev_msgSend:
-			sz = 14;
-			break;
-		case prof_ev_lockName:
-			sz = 20;
-			break;
-		case prof_ev_threadCreate:
-		case prof_ev_processExec:
-			sz = 133;
-			break;
-		case prof_ev_sample:
-			return (avail < 12U) ? 0U : urecEnd(p, avail, 12U + (size_t)p[11] * 8U);
-		case prof_ev_wait:
-			return (avail < 48U) ? 0U : urecEnd(p, avail, 48U + (size_t)p[47] * 8U);
-		default:
-			return 0;
-	}
-
-	return (avail < sz) ? 0U : sz;
 }
 
 
@@ -349,40 +248,6 @@ static uint8_t *readFile(const char *path, size_t *sz)
 }
 
 
-/*
- * A rolling trace (prof record -r) discards whole bytes, not events, so a stream may begin in the
- * middle of one. o is taken as an event boundary if RESYNC_RUN events parse from it back to back
- * (known ids, sizes that fit, time not going back), or all events up to the end of the stream do.
- */
-#define RESYNC_RUN 6U
-
-static int syncAt(const uint8_t *data, size_t sz, size_t o)
-{
-	unsigned int n = 0;
-	uint32_t prev = 0, ts;
-	size_t psz;
-
-	while (n < RESYNC_RUN) {
-		if (o == sz) {
-			return (n > 0U) ? 1 : 0;
-		}
-		if (o + 5U > sz) {
-			return 0;
-		}
-		ts = rd32(data + o);
-		psz = evSize(data[o + 4U], data + o + 5U, sz - o - 5U);
-		if ((psz == 0U) || ((n > 0U) && (ts < prev))) {
-			return 0;
-		}
-		prev = ts;
-		n++;
-		o += 5U + psz;
-	}
-
-	return 1;
-}
-
-
 static int loadStream(const char *path, int cpu)
 {
 	uint8_t *data, **files;
@@ -402,10 +267,11 @@ static int loadStream(const char *path, int cpu)
 	}
 	rep.files = files;
 	rep.files[rep.nfiles++] = data;
+	prof_mixAdd(&rep.mix, data, sz, cpu);
 
 	while (o + 5U <= sz) {
 		if (sync != 0) {
-			for (start = o; (o + 5U <= sz) && (syncAt(data, sz, o) == 0); o++) {
+			for (start = o; (o + 5U <= sz) && (prof_syncAt(data, sz, o) == 0); o++) {
 			}
 			skipped += o - start;
 			sync = 0;
@@ -413,18 +279,16 @@ static int loadStream(const char *path, int cpu)
 				break;
 			}
 		}
-		ev.ts = rd32(data + o);
+		ev.ts = prof_rd32(data + o);
 		ev.id = data[o + 4U];
 		ev.cpu = (uint8_t)cpu;
-		psz = evSize(ev.id, data + o + 5U, sz - o - 5U);
+		psz = prof_evSize(ev.id, data + o + 5U, sz - o - 5U);
 		if (psz == 0U) {
 			sync = 1;
 			continue;
 		}
 		ev.p = data + o + 5U;
 		ev.len = (uint32_t)psz;
-		rep.evCount[ev.id]++;
-		rep.evBytes[ev.id] += 5U + psz;
 		ev.seq = (uint32_t)rep.nevs;
 		if (evPush(&ev) < 0) {
 			return -ENOMEM;
@@ -727,7 +591,7 @@ static uint64_t waitObject(int syscall, uint32_t queue, const uint64_t *args, co
 
 	/* a 32-bit argument leaves the upper half of its register unspecified (AAPCS64) */
 	if (strcmp(name, "msgSend") == 0) {
-		return (t->msgMid != 0U) ? t->msgPort : (uint32_t)args[0];
+		return (t->waitMid != 0U) ? t->msgPort : (uint32_t)args[0];
 	}
 	if (strcmp(name, "futexWait") == 0) {
 		return args[0];
@@ -857,20 +721,21 @@ static void process(const ev_t *ev)
 	uint64_t args[4];
 	size_t o;
 	int tid, i;
+	uint8_t flags;
 
 	rep.lastTs = ev->ts;
 
 	switch (ev->id) {
 		case prof_ev_threadCreate:
 		case prof_ev_processExec:
-			t = thrGet(rd16(p + 2));
+			t = thrGet(prof_rd16(p + 2));
 			if (t != NULL) {
-				thrSetName(t, rd16(p), (const char *)p + 5, 128);
+				thrSetName(t, prof_rd16(p), (const char *)p + 5, 128);
 			}
 			break;
 
 		case prof_ev_syscallEnter:
-			t = thrGet(rd16(p + 1));
+			t = thrGet(prof_rd16(p + 1));
 			if (t != NULL) {
 				t->syscall = p[0];
 				t->msgMid = 0;
@@ -878,7 +743,7 @@ static void process(const ev_t *ev)
 			break;
 
 		case prof_ev_syscallExit:
-			t = thrGet(rd16(p + 1));
+			t = thrGet(prof_rd16(p + 1));
 			if (t != NULL) {
 				t->syscall = NO_SYSCALL;
 				t->msgMid = 0;
@@ -886,20 +751,20 @@ static void process(const ev_t *ev)
 			break;
 
 		case prof_ev_sample:
-			tid = rd16(p);
+			tid = prof_rd16(p);
 			t = thrGet(tid);
 			if ((t == NULL) || (p[2] > 2U)) {
 				break;
 			}
 			t->samples[p[2]]++;
 			rep.nsamples[p[2]]++;
-			o = 12U + (size_t)p[11] * 8U;
+			o = PROF_SAMPLE_KFRAMES + (size_t)p[PROF_SAMPLE_NK] * 8U;
 			urecParse(p, o, &u);
-			pcAdd(tid, (p[2] == 0U) ? u.pc : rd64(p + 3));
+			pcAdd(tid, (p[2] == 0U) ? u.pc : prof_rd64(p + 3));
 			break;
 
 		case prof_ev_wait:
-			tid = rd16(p);
+			tid = prof_rd16(p);
 			t = thrGet(tid);
 			if (t == NULL) {
 				break;
@@ -910,39 +775,41 @@ static void process(const ev_t *ev)
 				waitEnd(tid, t, ev->ts, 1);
 			}
 			for (i = 0; i < 4; i++) {
-				args[i] = rd64(p + 15 + 8 * i);
+				args[i] = prof_rd64(p + PROF_WAIT_ARGS + 8U * (unsigned int)i);
 			}
-			urecParse(p, 48U + (size_t)p[47] * 8U, &u);
+			urecParse(p, PROF_WAIT_KFRAMES + (size_t)p[PROF_WAIT_NK] * 8U, &u);
+			flags = p[PROF_WAIT_FLAGS];
 			t->waiting = 1;
-			t->waitFlags = p[2];
+			t->waitFlags = flags;
 			/* deferred (bit 1): written when it ended, blocked = how long; else when it began */
-			t->waitTs = ((p[2] & 2U) != 0U) ? ev->ts - rd32(p + 11) : ev->ts;
-			t->waitSyscall = ((p[2] & 1U) != 0U) ? NO_SYSCALL : t->syscall;
-			t->waitObj = waitObject(t->waitSyscall, rd32(p + 3), args, t);
-			t->waitTimeout = rd32(p + 7);
-			t->waitMid = t->msgMid;
-			t->waitPc = (u.nframes > 0U) ? rd64(u.frames) : u.lr;
-			if ((p[2] & 2U) == 0U) {
-				/* a deferred wait's thread_wakeup came before it: keep that one */
+			t->waitTs = ((flags & 2U) != 0U) ? ev->ts - prof_rd32(p + PROF_WAIT_BLOCKED) : ev->ts;
+			/* the wait names its syscall (from its SVC); syscall_enter events are the fallback */
+			t->waitSyscall = (prof_rd16(p + PROF_WAIT_SYSCALL) != 0xffffU) ? (int)prof_rd16(p + PROF_WAIT_SYSCALL) :
+				(((flags & 1U) != 0U) ? NO_SYSCALL : t->syscall);
+			t->waitMid = (t->waitSyscall == rep.scMsgSend) ? t->msgMid : 0U;
+			t->waitObj = waitObject(t->waitSyscall, prof_rd32(p + PROF_WAIT_QUEUE), args, t);
+			t->waitTimeout = prof_rd32(p + PROF_WAIT_TIMEOUT);
+			t->waitPc = (u.nframes > 0U) ? prof_rd64(u.frames) : u.lr;
+			if ((flags & 2U) != 0U) {
+				/* deferred: complete, its thread_wakeup came just before it (open: still waiting at the stop) */
+				waitEnd(tid, t, ev->ts, ((flags & 4U) != 0U) ? 1 : 0);
+			}
+			else {
 				t->wakeCause = -1;
 				t->waker = -1;
-			}
-			if ((p[2] & 4U) != 0U) {
-				/* still waiting when the trace stopped */
-				waitEnd(tid, t, ev->ts, 1);
 			}
 			break;
 
 		case prof_ev_wakeup:
-			t = thrGet(rd16(p));
+			t = thrGet(prof_rd16(p));
 			if (t != NULL) {
-				t->waker = rd16(p + 2);
+				t->waker = prof_rd16(p + 2);
 				t->wakeCause = (p[4] < CAUSES - 1U) ? p[4] : (int)CAUSES - 1;
 			}
 			break;
 
 		case prof_ev_waking:
-			tid = rd16(p);
+			tid = prof_rd16(p);
 			t = thrGet(tid);
 			if ((t != NULL) && (t->waiting != 0)) {
 				waitEnd(tid, t, ev->ts, 0);
@@ -955,29 +822,29 @@ static void process(const ev_t *ev)
 			break;
 
 		case prof_ev_msgSend:
-			t = thrGet(rd16(p));
-			m = msgFind(rd32(p + 10), 1);
+			t = thrGet(prof_rd16(p));
+			m = msgFind(prof_rd32(p + 10), 1);
 			if ((t != NULL) && (m != NULL)) {
-				t->msgMid = rd32(p + 10);
-				t->msgPort = rd32(p + 2);
-				t->msgType = rd32(p + 6);
-				m->client = rd16(p);
-				m->port = rd32(p + 2);
+				t->msgMid = prof_rd32(p + 10);
+				t->msgPort = prof_rd32(p + 2);
+				t->msgType = prof_rd32(p + 6);
+				m->client = prof_rd16(p);
+				m->port = prof_rd32(p + 2);
 				m->server = -1;
 			}
 			break;
 
 		case prof_ev_msgRecv:
-			m = msgFind(rd32(p + 6), 0);
+			m = msgFind(prof_rd32(p + 6), 0);
 			if (m != NULL) {
-				m->server = rd16(p);
+				m->server = prof_rd16(p);
 			}
 			break;
 
 		case prof_ev_msgRespond:
-			m = msgFind(rd32(p + 6), 0);
+			m = msgFind(prof_rd32(p + 6), 0);
 			if (m != NULL) {
-				m->server = rd16(p);
+				m->server = prof_rd16(p);
 				t = thrGet(m->client);
 				/* the client's wait ends with the wakeup that follows; keep m until then */
 				if ((t == NULL) || (t->waiting == 0) || (t->waitMid != m->mid)) {
@@ -1030,46 +897,6 @@ static uint64_t pcValue(uint64_t key)
 	uint64_t pc = key & 0xffffffffffffULL;
 
 	return ((pc >> 47) != 0U) ? (pc | 0xffff000000000000ULL) : pc;
-}
-
-
-/* What the trace consists of: what to cut when it is too big */
-static void printMix(void)
-{
-	static const char *const names[256] = {
-		[prof_ev_irqEnter] = "interrupt_enter", [prof_ev_irqExit] = "interrupt_exit", [prof_ev_scheduling] = "thread_scheduling",
-		[prof_ev_preempted] = "thread_preempted", [prof_ev_enqueued] = "thread_enqueued", [prof_ev_waking] = "thread_waking",
-		[prof_ev_threadCreate] = "thread_create", [prof_ev_threadEnd] = "thread_end", [prof_ev_syscallEnter] = "syscall_enter",
-		[prof_ev_syscallExit] = "syscall_exit", [prof_ev_schedEnter] = "sched_enter", [prof_ev_schedExit] = "sched_exit",
-		[prof_ev_lockName] = "lock_name", [prof_ev_lockSetEnter] = "lock_set_enter", [prof_ev_lockSetAcquired] = "lock_set_acquired",
-		[prof_ev_lockSetExit] = "lock_set_exit", [prof_ev_lockClear] = "lock_clear", [prof_ev_threadPriority] = "thread_priority",
-		[prof_ev_processKill] = "process_kill", [prof_ev_processExec] = "process_exec", [prof_ev_sample] = "thread_sample",
-		[prof_ev_wait] = "thread_wait", [prof_ev_wakeup] = "thread_wakeup", [prof_ev_msgSend] = "msg_send",
-		[prof_ev_msgRecv] = "msg_recv", [prof_ev_msgRespond] = "msg_respond"
-	};
-	uint64_t total = 0, best;
-	unsigned int i, k, pick;
-	int shown[256] = { 0 };
-
-	for (i = 0; i < 256U; i++) {
-		total += rep.evBytes[i];
-	}
-	printf("\nEvent mix (%.1f MB; %.2f MB/s)\n", (double)total / 1048576.0,
-		(rep.lastTs != 0U) ? (double)total / 1048576.0 / ((double)rep.lastTs / 1e6) : 0.0);
-	for (k = 0; k < 256U; k++) {
-		for (i = 0, best = 0, pick = 256U; i < 256U; i++) {
-			if ((shown[i] == 0) && (rep.evBytes[i] > best)) {
-				best = rep.evBytes[i];
-				pick = i;
-			}
-		}
-		if (pick == 256U) {
-			break;
-		}
-		shown[pick] = 1;
-		printf("  %-18s %10llu events %8.2f MB %5.1f%%\n", (names[pick] != NULL) ? names[pick] : "?",
-			(unsigned long long)rep.evCount[pick], (double)rep.evBytes[pick] / 1048576.0, 100.0 * (double)rep.evBytes[pick] / (double)total);
-	}
 }
 
 
@@ -1334,6 +1161,8 @@ int prof_report(int argc, char **argv)
 
 	memset(&rep, 0, sizeof(rep));
 	rep.top = 10;
+	for (rep.scMsgSend = 0; (rep.scMsgSend < NSYSCALLS) && (strcmp(syscallNames[rep.scMsgSend], "msgSend") != 0); rep.scMsgSend++) {
+	}
 
 	optind = 1;
 	while ((opt = getopt(argc, argv, "p:n:")) != -1) {
@@ -1394,7 +1223,7 @@ int prof_report(int argc, char **argv)
 		printf("prof: threads of pid %d only (CPU table: all)\n", rep.pidFilter);
 	}
 
-	printMix();
+	prof_mixPrint(stdout, &rep.mix, rep.ncpus, (double)rep.lastTs / 1e6);
 	printCpu();
 	printPcs();
 	printLongest();
