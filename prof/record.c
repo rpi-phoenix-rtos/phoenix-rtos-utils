@@ -362,14 +362,15 @@ static int record_classes(const char *list, unsigned int *classes)
 
 static void record_info(FILE *f, int pid, const perf_trace_cfg_t *cfg, unsigned int secs, int ncpus)
 {
-	fprintf(f, "version 3\npid %d\ncpus %d\nseconds %u\nperiod_us %u\ndepth %u\nsample_stack %u\nwait_stack %u\nwait_min_us %u\nevents 0x%x\n",
-		pid, ncpus, secs, cfg->samplePeriodUs, cfg->depth, cfg->sampleStack, cfg->waitStack, cfg->waitMinUs, cfg->events);
+	fprintf(f, "version 3\npid %d\ncpus %d\nseconds %u\nperiod_us %u\ndepth %u\nsample_stack %u\nwait_stack %u\nwait_min_us %u\nwait_stack_min_us %u\nevents 0x%x\n",
+		pid, ncpus, secs, cfg->samplePeriodUs, cfg->depth, cfg->sampleStack, cfg->waitStack, cfg->waitMinUs, cfg->waitStackMinUs, cfg->events);
 }
 
 
 int prof_record(int argc, char **argv)
 {
-	perf_trace_cfg_t cfg = { .samplePeriodUs = 2000, .depth = 16, .sampleStack = 512, .waitStack = 512, .waitMinUs = 1000, .events = 0 };
+	perf_trace_cfg_t cfg = { .samplePeriodUs = 2000, .depth = 16, .sampleStack = 512, .waitStack = 512, .waitMinUs = 1000, .events = 0,
+		.waitStackMinUs = 10000 };
 	unsigned int extra = 0;
 	prof_mix_t *mix;
 	const char *dir = PROF_DEFAULT_DIR, *libdirs = RECORD_LIBDIRS;
@@ -384,7 +385,7 @@ int prof_record(int argc, char **argv)
 	FILE *finfo;
 
 	optind = 1;
-	while ((opt = getopt(argc, argv, "t:o:p:f:d:s:w:b:M:e:rL:")) != -1) {
+	while ((opt = getopt(argc, argv, "t:o:p:f:d:s:w:b:B:M:e:rL:")) != -1) {
 		switch (opt) {
 			case 't':
 				secs = (unsigned int)strtoul(optarg, NULL, 0);
@@ -409,6 +410,9 @@ int prof_record(int argc, char **argv)
 				break;
 			case 'b':
 				cfg.waitMinUs = (unsigned int)strtoul(optarg, NULL, 0);
+				break;
+			case 'B':
+				cfg.waitStackMinUs = (unsigned int)strtoul(optarg, NULL, 0);
 				break;
 			case 'e':
 				if (record_classes(optarg, &extra) < 0) {

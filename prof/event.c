@@ -59,6 +59,31 @@ const char *prof_evName(uint8_t id)
 }
 
 
+const char *prof_exceptionName(unsigned int eclass)
+{
+	switch (eclass) {
+		case 0x24U:
+			return "data abort (page fault)";
+		case 0x20U:
+			return "instruction abort (page fault)";
+		case 0x00U:
+			return "undefined instruction";
+		case 0x07U:
+			return "FP/SIMD access";
+		case 0x22U:
+			return "PC alignment";
+		case 0x26U:
+			return "SP alignment";
+		case 0x2cU:
+			return "FP exception";
+		case 0x3cU:
+			return "BRK";
+		default:
+			return "exception";
+	}
+}
+
+
 /* Size of the user part of thread_sample/thread_wait starting at offset o, 0 if truncated */
 static size_t urecEnd(const uint8_t *p, size_t avail, size_t o)
 {
