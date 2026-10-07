@@ -136,6 +136,18 @@ typedef struct {
 } pchist_t;
 
 
+/* A count per key: open addressing, key 0 marks a free slot */
+typedef struct {
+	pchist_t *e;
+	size_t n, cap;
+} hist_t;
+
+
+/* Kernel entry of a kernel-mode sample: the syscall number, or one of these */
+#define ENTRY_EXCEPTION 0x10000U /* | ESR.EC */
+#define ENTRY_UNKNOWN   0x20000U
+
+
 static struct {
 	ev_t *evs;
 	size_t nevs, capevs;
@@ -148,8 +160,9 @@ static struct {
 
 	thr_t *thr[NTIDS];
 
-	pchist_t *pcs;
-	size_t npcs, cappcs;
+	hist_t pcs;     /* per thread: sampled pc (user or kernel) */
+	hist_t kentry;  /* per thread: why it was in the kernel (ENTRY_*, syscall) */
+	hist_t kcaller; /* per thread: where its kernel time went (the caller for a skid sample) */
 
 	waitagg_t *waits;
 	size_t nwaits, capwaits;
@@ -443,38 +456,61 @@ static int pcTid(uint64_t key)
 }
 
 
-static void pcAdd(int tid, uint64_t pc)
+static int pcCmp(const void *a, const void *b);
+
+
+static void histAdd(hist_t *h, int tid, uint64_t value)
 {
-	uint64_t key = pcKey(tid, pc);
+	uint64_t key = pcKey(tid, value);
 	pchist_t *e, *old, *n;
 	size_t i, cap;
 	int found;
 
-	if (2U * (rep.npcs + 1U) > rep.cappcs) {
-		cap = (rep.cappcs == 0U) ? 4096U : rep.cappcs * 2U;
+	if (2U * (h->n + 1U) > h->cap) {
+		cap = (h->cap == 0U) ? 4096U : h->cap * 2U;
 		n = calloc(cap, sizeof(*n));
 		if (n == NULL) {
 			return;
 		}
-		old = rep.pcs;
-		for (i = 0; i < rep.cappcs; i++) {
+		old = h->e;
+		for (i = 0; i < h->cap; i++) {
 			if (old[i].key != 0U) {
 				e = tableFind(n, cap, sizeof(*n), hash64(old[i].key), pcMatch, &old[i].key, &found);
 				*e = old[i];
 			}
 		}
 		free(old);
-		rep.pcs = n;
-		rep.cappcs = cap;
+		h->e = n;
+		h->cap = cap;
 	}
 
-	e = tableFind(rep.pcs, rep.cappcs, sizeof(*e), hash64(key), pcMatch, &key, &found);
+	e = tableFind(h->e, h->cap, sizeof(*e), hash64(key), pcMatch, &key, &found);
 	if (found == 0) {
 		e->key = key;
 		e->count = 0;
-		rep.npcs++;
+		h->n++;
 	}
 	e->count++;
+}
+
+
+/* The entries of h grouped by thread, by count; *n is set to their number */
+static pchist_t *histSorted(const hist_t *h, size_t *n)
+{
+	pchist_t *v = malloc((h->n + 1U) * sizeof(*v));
+	size_t i, j = 0;
+
+	if (v != NULL) {
+		for (i = 0; i < h->cap; i++) {
+			if (h->e[i].key != 0U) {
+				v[j++] = h->e[i];
+			}
+		}
+		qsort(v, j, sizeof(*v), pcCmp);
+	}
+	*n = j;
+
+	return v;
 }
 
 
@@ -760,7 +796,21 @@ static void process(const ev_t *ev)
 			rep.nsamples[p[2]]++;
 			o = PROF_SAMPLE_KFRAMES + (size_t)p[PROF_SAMPLE_NK] * 8U;
 			urecParse(p, o, &u);
-			pcAdd(tid, (p[2] == 0U) ? u.pc : prof_rd64(p + 3));
+			histAdd(&rep.pcs, tid, (p[PROF_SAMPLE_MODE] == 0U) ? u.pc : prof_rd64(p + PROF_SAMPLE_KPC));
+			if (p[PROF_SAMPLE_MODE] == 1U) {
+				/* why it is in the kernel, and where the time went: past a skid, the caller */
+				if (prof_rd16(p + PROF_SAMPLE_SYSCALL) != 0xffffU) {
+					histAdd(&rep.kentry, tid, prof_rd16(p + PROF_SAMPLE_SYSCALL));
+				}
+				else if (p[PROF_SAMPLE_ECLASS] != 0xffU) {
+					histAdd(&rep.kentry, tid, ENTRY_EXCEPTION | p[PROF_SAMPLE_ECLASS]);
+				}
+				else {
+					histAdd(&rep.kentry, tid, ENTRY_UNKNOWN);
+				}
+				histAdd(&rep.kcaller, tid, ((p[PROF_SAMPLE_KFLAGS] & PROF_SAMPLE_SKID) != 0U) ? prof_rd64(p + PROF_SAMPLE_KLR) :
+					prof_rd64(p + PROF_SAMPLE_KPC));
+			}
 			break;
 
 		case prof_ev_wait:
@@ -980,8 +1030,10 @@ static int thrRankCmp(const void *a, const void *b)
 static void printPcs(void)
 {
 	thrrank_t *rank = calloc(NTIDS, sizeof(*rank));
-	size_t nrank = 0, i, j, k, shown;
-	pchist_t *pcs;
+	size_t nrank = 0, i, k, shown, npcs, nent, nkc;
+	pchist_t *pcs, *ent, *kc;
+	uint64_t value;
+	char what[48];
 	thr_t *t;
 	int tid;
 
@@ -999,18 +1051,16 @@ static void printPcs(void)
 	}
 	qsort(rank, nrank, sizeof(*rank), thrRankCmp);
 
-	/* the PC table, grouped by thread, by count */
-	pcs = malloc((rep.npcs + 1U) * sizeof(*pcs));
-	if (pcs == NULL) {
+	pcs = histSorted(&rep.pcs, &npcs);
+	ent = histSorted(&rep.kentry, &nent);
+	kc = histSorted(&rep.kcaller, &nkc);
+	if ((pcs == NULL) || (ent == NULL) || (kc == NULL)) {
+		free(pcs);
+		free(ent);
+		free(kc);
 		free(rank);
 		return;
 	}
-	for (i = 0, j = 0; i < rep.cappcs; i++) {
-		if (rep.pcs[i].key != 0U) {
-			pcs[j++] = rep.pcs[i];
-		}
-	}
-	qsort(pcs, j, sizeof(*pcs), pcCmp);
 
 	printf("\nBusiest threads (process samples; top PCs, kernel ones are 0xffffffff...)\n");
 	for (i = 0; (i < nrank) && (i < rep.top); i++) {
@@ -1018,14 +1068,44 @@ static void printPcs(void)
 		t = rep.thr[tid];
 		printf("  tid %-5d pid %-5d %-24.24s %6u samples (user %u, kernel %u)\n", tid, t->pid, t->name,
 			rank[i].samples, t->samples[0], t->samples[1]);
-		for (k = 0, shown = 0; (k < j) && (shown < 5U); k++) {
+		for (k = 0, shown = 0; (k < npcs) && (shown < 5U); k++) {
 			if (pcTid(pcs[k].key) == tid) {
 				printf("      %6u  0x%llx\n", pcs[k].count, (unsigned long long)pcValue(pcs[k].key));
 				shown++;
 			}
 		}
+		if (t->samples[1] == 0U) {
+			continue;
+		}
+		printf("    kernel time by entry:");
+		for (k = 0, shown = 0; (k < nent) && (shown < 6U); k++) {
+			if (pcTid(ent[k].key) == tid) {
+				value = pcValue(ent[k].key);
+				if (value == ENTRY_UNKNOWN) {
+					snprintf(what, sizeof(what), "?");
+				}
+				else if ((value & ENTRY_EXCEPTION) != 0U) {
+					snprintf(what, sizeof(what), "%s", prof_exceptionName((unsigned int)(value & 0xffU)));
+				}
+				else {
+					snprintf(what, sizeof(what), "%s", ((int)value < NSYSCALLS) ? syscallNames[value] : "syscall?");
+				}
+				printf("%s %s %.0f%%", (shown == 0U) ? "" : ",", what, 100.0 * ent[k].count / t->samples[1]);
+				shown++;
+			}
+		}
+		printf("\n    kernel time at (a skid sample: its caller):");
+		for (k = 0, shown = 0; (k < nkc) && (shown < 5U); k++) {
+			if (pcTid(kc[k].key) == tid) {
+				printf(" 0x%llx %.0f%%", (unsigned long long)pcValue(kc[k].key), 100.0 * kc[k].count / t->samples[1]);
+				shown++;
+			}
+		}
+		printf("\n");
 	}
 
+	free(ent);
+	free(kc);
 	free(pcs);
 	free(rank);
 }
@@ -1238,7 +1318,9 @@ int prof_report(int argc, char **argv)
 	}
 	free(rep.files);
 	free(rep.evs);
-	free(rep.pcs);
+	free(rep.pcs.e);
+	free(rep.kentry.e);
+	free(rep.kcaller.e);
 	free(rep.waits);
 	free(rep.edges);
 	free(rep.msgs);

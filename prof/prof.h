@@ -54,8 +54,18 @@ enum {
 
 
 /* Payload offsets of thread_sample and thread_wait (the user part follows the kernel frames) */
-#define PROF_SAMPLE_NK      11U
-#define PROF_SAMPLE_KFRAMES 12U
+#define PROF_SAMPLE_MODE    2U
+#define PROF_SAMPLE_KFLAGS  3U
+#define PROF_SAMPLE_KPC     4U
+#define PROF_SAMPLE_KLR     12U
+#define PROF_SAMPLE_SYSCALL 20U
+#define PROF_SAMPLE_ECLASS  22U
+#define PROF_SAMPLE_KFAR    23U
+#define PROF_SAMPLE_NK      31U
+#define PROF_SAMPLE_KFRAMES 32U
+
+#define PROF_SAMPLE_SKID  (1U << 0) /* kflags: kpc follows an interrupt unmask, the work was before it */
+#define PROF_WAIT_REPEAT  (1U << 3) /* thread_wait flags: frames and stack as the thread's previous wait */
 #define PROF_WAIT_FLAGS     2U
 #define PROF_WAIT_QUEUE     3U
 #define PROF_WAIT_TIMEOUT   7U
@@ -97,6 +107,10 @@ static inline uint64_t prof_rd64(const uint8_t *p)
 
 
 const char *prof_evName(uint8_t id);
+
+
+/* Name of an exception class (ESR.EC) a thread enters the kernel with */
+const char *prof_exceptionName(unsigned int eclass);
 
 
 /* Payload size of an event, 0 if unknown or truncated */
