@@ -10,11 +10,13 @@
  */
 
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
 
 #include <sys/file.h>
+#include <sys/mount.h>
 #include <sys/msg.h>
 #include <sys/stat.h>
 
@@ -38,6 +40,19 @@ static int psh_bindLookup(const char *name, oid_t *oid)
 	}
 
 	return err;
+}
+
+
+/* Lists the bind in the mount table, so that df and mount show it. Best effort:
+ * binding devfs on /dev is what makes the table writable in the first place. */
+static void psh_bindRecord(const char *source, const char *target)
+{
+	char *path = realpath(target, NULL);
+
+	if (path != NULL) {
+		(void)mount_record(source, path, "bind", "rw");
+		free(path);
+	}
 }
 
 
@@ -101,6 +116,8 @@ int psh_bind(int argc, char **argv)
 		fprintf(stderr, "bind: server responded with %d\n", msg.o.err);
 		return msg.o.err;
 	}
+
+	psh_bindRecord(argv[1], argv[2]);
 
 	return EOK;
 }

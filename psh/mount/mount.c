@@ -12,6 +12,7 @@
  */
 
 #include <errno.h>
+#include <mntent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,26 @@ void psh_mountinfo(void)
 }
 
 
+/* Lists the mounted filesystems. */
+static int psh_mount_list(void)
+{
+	struct mntent *ent;
+	FILE *table = setmntent(MOUNTED, "r");
+
+	if (table == NULL) {
+		(void)fprintf(stderr, "mount: %s: %s\n", MOUNTED, strerror(errno));
+		return EXIT_FAILURE;
+	}
+
+	while ((ent = getmntent(table)) != NULL) {
+		(void)printf("%s on %s type %s (%s)\n", ent->mnt_fsname, ent->mnt_dir, ent->mnt_type, ent->mnt_opts);
+	}
+	(void)endmntent(table);
+
+	return EXIT_SUCCESS;
+}
+
+
 int psh_mount(int argc, char **argv)
 {
 	int err;
@@ -34,8 +55,12 @@ int psh_mount(int argc, char **argv)
 	char *endptr;
 	unsigned long mode;
 
+	if (argc == 1) {
+		return psh_mount_list();
+	}
+
 	if ((argc < 5) || (argc > 6)) {
-		(void)fprintf(stderr, "usage: %s <source> <target> <fstype> <mode> [data]\n", argv[0]);
+		(void)fprintf(stderr, "usage: %s [<source> <target> <fstype> <mode> [data]]\n", argv[0]);
 		return EXIT_FAILURE;
 	}
 
